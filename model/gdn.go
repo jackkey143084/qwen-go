@@ -47,12 +47,12 @@ func newGdnCache(g *gatedDeltaNet) *gdnCache {
 
 func newGatedDeltaNet(cfg *Config) *gatedDeltaNet {
 	g := &gatedDeltaNet{
-		nKHeads:  cfg.NLinearKHeads,
-		nVHeads:  cfg.NLinearVHeads,
-		dK:       cfg.DLinearK,
-		dV:       cfg.DLinearV,
-		convDim:  cfg.NLinearKHeads*cfg.DLinearK*2 + cfg.NLinearVHeads*cfg.DLinearV,
-		kernel:   cfg.LinearConvKernel,
+		nKHeads: cfg.NLinearKHeads,
+		nVHeads: cfg.NLinearVHeads,
+		dK:      cfg.DLinearK,
+		dV:      cfg.DLinearV,
+		convDim: cfg.NLinearKHeads*cfg.DLinearK*2 + cfg.NLinearVHeads*cfg.DLinearV,
+		kernel:  cfg.LinearConvKernel,
 	}
 	g.dtBias = make([]float32, g.nVHeads)
 	for i := range g.dtBias {
@@ -69,11 +69,13 @@ func (g *gatedDeltaNet) forward(x []float32, T int, cache *gdnCache) []float32 {
 	r := g.nVHeads / g.nKHeads
 
 	// per-token scalars
-	beta := make([]float32, T*H)   // sigmoid(in_proj_b)
-	gg := make([]float32, T*H)     // -exp(A_log) * softplus(a + dt_bias)
+	beta := make([]float32, T*H) // sigmoid(in_proj_b)
+	gg := make([]float32, T*H)   // -exp(A_log) * softplus(a + dt_bias)
 	{
-		b := proj(x, T, g.inProjB.w, g.bQuant, H)
-		a := proj(x, T, g.inProjA.w, g.aQuant, H)
+		b := proj(x, T, &g.inProjB, g.bQuant, H)
+		a := proj(x, T, &g.inProjA, g.aQuant, H)
+		traceCK("gdn_b", b)
+		traceCK("gdn_a", a)
 		for t := 0; t < T; t++ {
 			for h := 0; h < H; h++ {
 				beta[t*H+h] = sigmoid1(b[t*H+h])
@@ -83,33 +85,42 @@ func (g *gatedDeltaNet) forward(x []float32, T int, cache *gdnCache) []float32 {
 		}
 	}
 
+	traceCK("gdn_beta", beta)
+	traceCK("gdn_g", gg)
 	// causal depthwise conv over cached window ++ new tokens, then SiLU
-	qkv := proj(x, T, g.inProjQKV.w, g.qkvQuant, g.convDim) // (T, convDim)
+	qkv := proj(x, T, &g.inProjQKV, g.qkvQuant, g.convDim) // (T, convDim)
+	traceCK("gdn_qkv", qkv)
 	combined := make([]float32, 0, len(cache.conv)+len(qkv))
 	combined = append(combined, cache.conv...)
 	combined = append(combined, qkv...)
+	traceCK("gdn_conv_presilu_window", combined)
 	// new cache window: last kernel-1 channels (all from the new tokens)
 	copy(cache.conv, combined[len(combined)-g.convDim*(g.kernel-1):])
+	convRaw := make([]float32, T*g.convDim)
 	convOut := make([]float32, T*g.convDim)
 	for t := 0; t < T; t++ {
 		for ch := 0; ch < g.convDim; ch++ {
 			var s float32
-			// causal window: taps run from token t-(kernel-1) up to token t;
-			// tokens before 0 are the zero left-pad
+			// causal window: combined already starts with the K-1 token
+			// window (zeros on the first call = the causal left pad), so
+			// torch's padded[t+j] maps directly to combined[t+j]
 			for j := 0; j < g.kernel; j++ {
-				idx := t + j - (g.kernel - 1)
+				idx := t + j
 				var val float32
-				if idx < 0 {
-					val = 0 // left zero pad
+				if idx >= len(combined)/g.convDim {
+					val = 0
 				} else {
 					val = combined[idx*g.convDim+ch]
 				}
-				s += g.convW[j*g.convDim+ch] * val
+				// torch conv1d weight: (out_ch, 1, kernel) → W[ch,0,j]
+				s += g.convW[ch*g.kernel+j] * val
 			}
+			convRaw[t*g.convDim+ch] = s
 			convOut[t*g.convDim+ch] = s / (1 + float32(math.Exp(-float64(s))))
 		}
 	}
 
+	traceCK("gdn_conv", convRaw)
 	// split + head views; l2norm q,k with per-v-head repeat
 	q := make([]float32, T*H*g.dK)
 	k := make([]float32, T*H*g.dK)
@@ -186,9 +197,11 @@ func (g *gatedDeltaNet) forward(x []float32, T int, cache *gdnCache) []float32 {
 		}
 	}
 
+	traceCK("gdn_recur", out)
 	// gated output norm + project
 	y := make([]float32, T*ne)
-	z := proj(x, T, g.inProjZ.w, g.zQuant, H*g.dV)
+	z := proj(x, T, &g.inProjZ, g.zQuant, H*g.dV)
+	traceCK("gdn_z", z)
 	eps := float32(1e-6)
 	for t := 0; t < T; t++ {
 		for h := 0; h < H; h++ {
@@ -196,7 +209,9 @@ func (g *gatedDeltaNet) forward(x []float32, T int, cache *gdnCache) []float32 {
 			zt := z[t*H*g.dV+h*g.dV : t*H*g.dV+(h+1)*g.dV]
 			rmsNormGatedApply(o, g.normW, zt, eps)
 		}
-		copy(y[t*ne:(t+1)*ne], proj(out[t*H*g.dV:(t+1)*H*g.dV], 1, g.outProj.w, g.outQuant, ne))
+		copy(y[t*ne:(t+1)*ne], proj(out[t*H*g.dV:(t+1)*H*g.dV], 1, &g.outProj, g.outQuant, ne))
 	}
+	traceCK("gdn_norm", out)
+	traceCK("gdn_out", y)
 	return y
 }

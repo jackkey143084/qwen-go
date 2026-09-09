@@ -15,22 +15,21 @@ import (
 	"io"
 	"math"
 	"os"
-	"unsafe"
 )
 
 // Dtype mirrors the dtypes we can meet in Qwen checkpoints.
 type Dtype string
 
 const (
-	F32   Dtype = "F32"
-	F16   Dtype = "F16"
-	BF16  Dtype = "BF16"
-	I64   Dtype = "I64"
-	I32   Dtype = "I32"
-	I8    Dtype = "I8"
-	U8    Dtype = "U8"
-	F64   Dtype = "F64"
-	BOOL  Dtype = "BOOL"
+	F32    Dtype = "F32"
+	F16    Dtype = "F16"
+	BF16   Dtype = "BF16"
+	I64    Dtype = "I64"
+	I32    Dtype = "I32"
+	I8     Dtype = "I8"
+	U8     Dtype = "U8"
+	F64    Dtype = "F64"
+	BOOL   Dtype = "BOOL"
 	F8E4M3 Dtype = "F8_E4M3"
 )
 
@@ -42,8 +41,9 @@ type TensorInfo struct {
 
 // File is one loaded safetensors file.
 type File struct {
-	data   []byte
-	Header map[string]TensorInfo `json:"-"`
+	data      []byte
+	dataStart int64                 // where the data section begins (8 + header length)
+	Header    map[string]TensorInfo `json:"-"`
 }
 
 // Open reads and parses a safetensors file.
@@ -70,7 +70,7 @@ func Parse(raw []byte) (*File, error) {
 		return nil, fmt.Errorf("safetensors: bad header json: %w", err)
 	}
 	delete(header, "__metadata__")
-	return &File{data: raw, Header: header}, nil
+	return &File{data: raw, dataStart: int64(8 + n), Header: header}, nil
 }
 
 // Keys lists tensor names, sorted for deterministic loading.
@@ -101,6 +101,8 @@ func (f *File) Raw(name string) ([]byte, []int, Dtype, error) {
 		return nil, nil, "", fmt.Errorf("safetensors: no tensor %q", name)
 	}
 	lo, hi := info.DataOffset[0], info.DataOffset[1]
+	lo += f.dataStart
+	hi += f.dataStart
 	if hi > int64(len(f.data)) {
 		return nil, nil, "", fmt.Errorf("safetensors: tensor %q out of range", name)
 	}

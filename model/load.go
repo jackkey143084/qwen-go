@@ -54,9 +54,10 @@ func FromPretrained(weightsPath string) (*model, *tokenizer.Tokenizer, error) {
 		return nil, nil, err
 	}
 	m := newModel(cfg)
-	if err := m.alloc(nil); err != nil {
+	if err := m.alloc(nil, true); err != nil {
 		return nil, nil, err
 	}
+	m.rawMode = true
 
 	shards, err := filepath.Glob(filepath.Join(weightsPath, "*.safetensors"))
 	if err != nil {
@@ -66,14 +67,15 @@ func FromPretrained(weightsPath string) (*model, *tokenizer.Tokenizer, error) {
 	if len(shards) == 0 {
 		return nil, nil, fmt.Errorf("no .safetensors shards in %s", weightsPath)
 	}
+	// NB: shard mmaps are intentionally kept open — raw weight slices point
+	// into the mapped pages.
 	for _, shard := range shards {
 		f, closer, err := openShard(shard)
 		if err != nil {
 			return nil, nil, err
 		}
-		err = m.loadShards(f, shard)
-		closer.Close()
-		if err != nil {
+		m.closers = append(m.closers, closer)
+		if err := m.loadShards(f, shard); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -101,87 +103,98 @@ func (m *model) loadShards(f *safetensors.File, shard string) error {
 // alloc materializes every weight buffer. quantTargets (names like
 // "layers.3.self_attn.q_proj") skip dense allocation — their weights arrive
 // as qweight/scale.
-func (m *model) alloc(quantTargets map[string]bool) error {
+func (m *model) alloc(quantTargets map[string]bool, rawMode bool) error {
 	if quantTargets == nil {
 		quantTargets = map[string]bool{}
 	}
 	cfg := m.cfg
 	ne := cfg.NEmbed
-	m.embed = make([]float32, cfg.NVocab*ne)
 	m.norm = make([]float32, ne)
-	if !m.tied {
-		m.lmHead = make([]float32, cfg.NVocab*ne)
+	if !rawMode {
+		m.embed.w = make([]float32, cfg.NVocab*ne)
+		if !m.tied {
+			m.lmHead.w = make([]float32, cfg.NVocab*ne)
+		}
 	}
 	for i := range m.layers {
 		l := &m.layers[i]
 		if l.attn != nil {
 			a := l.attn
 			a.nEmbed = ne
-			if !quantTargets[keyOf(i, "self_attn.q_proj")] {
-				a.qProj.w = make([]float32, a.nHeads*2*a.dHead*ne)
-			}
-			if !quantTargets[keyOf(i, "self_attn.k_proj")] {
-				a.kProj.w = make([]float32, a.nKV*a.dHead*ne)
-			}
-			if !quantTargets[keyOf(i, "self_attn.v_proj")] {
-				a.vProj.w = make([]float32, a.nKV*a.dHead*ne)
-			}
-			if !quantTargets[keyOf(i, "self_attn.o_proj")] {
-				a.oProj.w = make([]float32, ne*a.nHeads*a.dHead)
+			if !rawMode {
+				if !quantTargets[keyOf(i, "self_attn.q_proj")] {
+					a.qProj.w = make([]float32, a.nHeads*2*a.dHead*ne)
+				}
+				if !quantTargets[keyOf(i, "self_attn.k_proj")] {
+					a.kProj.w = make([]float32, a.nKV*a.dHead*ne)
+				}
+				if !quantTargets[keyOf(i, "self_attn.v_proj")] {
+					a.vProj.w = make([]float32, a.nKV*a.dHead*ne)
+				}
+				if !quantTargets[keyOf(i, "self_attn.o_proj")] {
+					a.oProj.w = make([]float32, ne*a.nHeads*a.dHead)
+				}
 			}
 		}
 		if l.gdn != nil {
 			g := l.gdn
 			g.nEmbed = ne
-			if !quantTargets[keyOf(i, "linear_attn.in_proj_qkv")] {
-				g.inProjQKV.w = make([]float32, g.convDim*ne)
-			}
-			if !quantTargets[keyOf(i, "linear_attn.in_proj_z")] {
-				g.inProjZ.w = make([]float32, g.nVHeads*g.dV*ne)
-			}
-			if !quantTargets[keyOf(i, "linear_attn.in_proj_b")] {
-				g.inProjB.w = make([]float32, g.nVHeads*ne)
-			}
-			if !quantTargets[keyOf(i, "linear_attn.in_proj_a")] {
-				g.inProjA.w = make([]float32, g.nVHeads*ne)
-			}
-			if !quantTargets[keyOf(i, "linear_attn.out_proj")] {
-				g.outProj.w = make([]float32, ne*g.nVHeads*g.dV)
+			if !rawMode {
+				if !quantTargets[keyOf(i, "linear_attn.in_proj_qkv")] {
+					g.inProjQKV.w = make([]float32, g.convDim*ne)
+				}
+				if !quantTargets[keyOf(i, "linear_attn.in_proj_z")] {
+					g.inProjZ.w = make([]float32, g.nVHeads*g.dV*ne)
+				}
+				if !quantTargets[keyOf(i, "linear_attn.in_proj_b")] {
+					g.inProjB.w = make([]float32, g.nVHeads*ne)
+				}
+				if !quantTargets[keyOf(i, "linear_attn.in_proj_a")] {
+					g.inProjA.w = make([]float32, g.nVHeads*ne)
+				}
+				if !quantTargets[keyOf(i, "linear_attn.out_proj")] {
+					g.outProj.w = make([]float32, ne*g.nVHeads*g.dV)
+				}
 			}
 			g.convW = make([]float32, g.convDim*g.kernel)
 		}
 		if cfg.NExperts > 0 {
 			moe := l.mlp.(*moeMLP)
 			moe.nEmbedSet = ne
-			if !quantTargets[keyOf(i, "mlp.gate")] {
+			if !quantTargets[keyOf(i, "mlp.gate")] && !rawMode {
 				moe.gate.w = make([]float32, moe.nExperts*moe.nEmbed)
 			}
 			if moe.shared != nil {
-				if !quantTargets[keyOf(i, "mlp.shared_expert.gate_proj")] {
-					moe.shared.gate.w = make([]float32, cfg.NSharedExpertMlp*ne)
-				}
-				if !quantTargets[keyOf(i, "mlp.shared_expert.up_proj")] {
-					moe.shared.up.w = make([]float32, cfg.NSharedExpertMlp*ne)
-				}
-				if !quantTargets[keyOf(i, "mlp.shared_expert.down_proj")] {
-					moe.shared.down.w = make([]float32, ne*cfg.NSharedExpertMlp)
+				if !rawMode {
+					if !quantTargets[keyOf(i, "mlp.shared_expert.gate_proj")] {
+						moe.shared.gate.w = make([]float32, cfg.NSharedExpertMlp*ne)
+					}
+					if !quantTargets[keyOf(i, "mlp.shared_expert.up_proj")] {
+						moe.shared.up.w = make([]float32, cfg.NSharedExpertMlp*ne)
+					}
+					if !quantTargets[keyOf(i, "mlp.shared_expert.down_proj")] {
+						moe.shared.down.w = make([]float32, ne*cfg.NSharedExpertMlp)
+					}
 				}
 				if !quantTargets[keyOf(i, "mlp.shared_expert_gate")] {
 					moe.sharedGate = make([]float32, ne)
 				}
 			}
+			_ = moe.gateUpW
 		} else {
 			d := l.mlp.(*denseMLP)
 			d.nEmbed = ne
 			d.nMlp = cfg.NMlp
-			if !quantTargets[keyOf(i, "mlp.gate_proj")] {
-				d.gate.w = make([]float32, cfg.NMlp*ne)
-			}
-			if !quantTargets[keyOf(i, "mlp.up_proj")] {
-				d.up.w = make([]float32, cfg.NMlp*ne)
-			}
-			if !quantTargets[keyOf(i, "mlp.down_proj")] {
-				d.down.w = make([]float32, ne*cfg.NMlp)
+			if !rawMode {
+				if !quantTargets[keyOf(i, "mlp.gate_proj")] {
+					d.gate.w = make([]float32, cfg.NMlp*ne)
+				}
+				if !quantTargets[keyOf(i, "mlp.up_proj")] {
+					d.up.w = make([]float32, cfg.NMlp*ne)
+				}
+				if !quantTargets[keyOf(i, "mlp.down_proj")] {
+					d.down.w = make([]float32, ne*cfg.NMlp)
+				}
 			}
 		}
 	}
@@ -190,6 +203,42 @@ func (m *model) alloc(quantTargets map[string]bool) error {
 
 func keyOf(layer int, mod string) string {
 	return fmt.Sprintf("layers.%d.%s", layer, mod)
+}
+
+// setLinear fills a projection from a safetensors tensor: bf16 stays raw
+// (memory-dense), everything else upcasts to f32.
+func setLinear(l *linear, f *safetensors.File, key string, rawMode bool) error {
+	if _, ok := f.Info(key); !ok {
+		return fmt.Errorf("no tensor %q", key)
+	}
+	raw, shape, dt, err := f.Raw(key)
+	if err != nil {
+		return err
+	}
+	if len(shape) != 2 {
+		return fmt.Errorf("%q: want 2D, got %v", key, shape)
+	}
+	if rawMode && dt == safetensors.BF16 {
+		// zero-copy: the slice points into the shard's mmap. Clean file
+		// pages are kernel-reclaimable, so this beats copying 1.6GB into
+		// the Go heap under a tight cgroup limit.
+		l.raw = raw
+		l.outDim, l.inDim = shape[0], shape[1]
+		return nil
+	}
+	v, _, err := f.F32(key)
+	if err != nil {
+		return err
+	}
+	if len(v) != len(l.w) && l.w != nil {
+		return fmt.Errorf("%q: want %d values, got %d", key, len(l.w), len(v))
+	}
+	if l.w != nil {
+		copy(l.w, v)
+	} else {
+		l.w = v
+	}
+	return nil
 }
 
 func setF32(dst *[]float32, vals []float32) error {
@@ -203,11 +252,7 @@ func setF32(dst *[]float32, vals []float32) error {
 func (m *model) loadTensor(name string, f *safetensors.File, key string) error {
 	cfg := m.cfg
 	if name == "embed_tokens.weight" {
-		v, _, err := f.F32(key)
-		if err != nil {
-			return err
-		}
-		return setF32(&m.embed, v)
+		return setLinear(&m.embed, f, key, true)
 	}
 	if name == "norm.weight" {
 		v, _, err := f.F32(key)
@@ -220,11 +265,7 @@ func (m *model) loadTensor(name string, f *safetensors.File, key string) error {
 		if m.tied {
 			return nil
 		}
-		v, _, err := f.F32(key)
-		if err != nil {
-			return err
-		}
-		return setF32(&m.lmHead, v)
+		return setLinear(&m.lmHead, f, key, true)
 	}
 	if strings.HasPrefix(name, "layers.") {
 		rest := name[len("layers."):]
@@ -258,73 +299,83 @@ func (m *model) loadTensor(name string, f *safetensors.File, key string) error {
 			}
 			return setF32(&l.postAttentionLayernorm, v)
 		case strings.HasPrefix(rel, "self_attn."):
-			return loadAttn(l.attn, strings.TrimPrefix(rel, "self_attn."), f, key)
+			return loadAttn(l.attn, strings.TrimPrefix(rel, "self_attn."), f, key, m.rawMode)
 		case strings.HasPrefix(rel, "linear_attn."):
-			return loadGDN(l.gdn, strings.TrimPrefix(rel, "linear_attn."), f, key)
+			return loadGDN(l.gdn, strings.TrimPrefix(rel, "linear_attn."), f, key, m.rawMode)
 		case strings.HasPrefix(rel, "mlp."):
-			return loadMLP(cfg, l, strings.TrimPrefix(rel, "mlp."), f, key)
+			return loadMLP(cfg, l, strings.TrimPrefix(rel, "mlp."), f, key, m.rawMode)
 		}
 	}
 	return nil // unknown keys (rotary buffers etc.) are fine to skip
 }
 
-func loadAttn(a *selfAttention, rel string, f *safetensors.File, key string) error {
-	var dst *[]float32
+func loadAttn(a *selfAttention, rel string, f *safetensors.File, key string, rawMode bool) error {
 	switch rel {
 	case "q_proj.weight":
-		dst = &a.qProj.w
+		return setLinear(&a.qProj, f, key, rawMode)
 	case "k_proj.weight":
-		dst = &a.kProj.w
+		return setLinear(&a.kProj, f, key, rawMode)
 	case "v_proj.weight":
-		dst = &a.vProj.w
+		return setLinear(&a.vProj, f, key, rawMode)
 	case "o_proj.weight":
-		dst = &a.oProj.w
+		return setLinear(&a.oProj, f, key, rawMode)
 	case "q_norm.weight":
-		dst = &a.qNorm
+		v, _, err := f.F32(key)
+		if err != nil {
+			return err
+		}
+		return setF32(&a.qNorm, v)
 	case "k_norm.weight":
-		dst = &a.kNorm
-	default:
-		return nil
+		v, _, err := f.F32(key)
+		if err != nil {
+			return err
+		}
+		return setF32(&a.kNorm, v)
 	}
-	v, _, err := f.F32(key)
-	if err != nil {
-		return err
-	}
-	return setF32(dst, v)
+	return nil
 }
 
-func loadGDN(g *gatedDeltaNet, rel string, f *safetensors.File, key string) error {
-	var dst *[]float32
+func loadGDN(g *gatedDeltaNet, rel string, f *safetensors.File, key string, rawMode bool) error {
 	switch rel {
 	case "in_proj_qkv.weight":
-		dst = &g.inProjQKV.w
+		return setLinear(&g.inProjQKV, f, key, rawMode)
 	case "in_proj_z.weight":
-		dst = &g.inProjZ.w
+		return setLinear(&g.inProjZ, f, key, rawMode)
 	case "in_proj_b.weight":
-		dst = &g.inProjB.w
+		return setLinear(&g.inProjB, f, key, rawMode)
 	case "in_proj_a.weight":
-		dst = &g.inProjA.w
+		return setLinear(&g.inProjA, f, key, rawMode)
 	case "out_proj.weight":
-		dst = &g.outProj.w
+		return setLinear(&g.outProj, f, key, rawMode)
 	case "conv1d.weight":
-		dst = &g.convW
+		v, _, err := f.F32(key)
+		if err != nil {
+			return err
+		}
+		return setF32(&g.convW, v)
 	case "dt_bias":
-		dst = &g.dtBias
+		v, _, err := f.F32(key)
+		if err != nil {
+			return err
+		}
+		return setF32(&g.dtBias, v)
 	case "A_log":
-		dst = &g.aLog
+		v, _, err := f.F32(key)
+		if err != nil {
+			return err
+		}
+		return setF32(&g.aLog, v)
 	case "norm.weight":
-		dst = &g.normW
-	default:
-		return nil
+		v, _, err := f.F32(key)
+		if err != nil {
+			return err
+		}
+		return setF32(&g.normW, v)
 	}
-	v, _, err := f.F32(key)
-	if err != nil {
-		return err
-	}
-	return setF32(dst, v)
+	return nil
 }
 
-func loadMLP(cfg *Config, l *block, rel string, f *safetensors.File, key string) error {
+func loadMLP(cfg *Config, l *block, rel string, f *safetensors.File, key string, rawMode bool) error {
 	get := func(dst *[]float32) error {
 		v, _, err := f.F32(key)
 		if err != nil {
@@ -332,17 +383,48 @@ func loadMLP(cfg *Config, l *block, rel string, f *safetensors.File, key string)
 		}
 		return setF32(dst, v)
 	}
+	lin := func(l *linear) error { return setLinear(l, f, key, rawMode) }
 	if cfg.NExperts > 0 {
 		moe := l.mlp.(*moeMLP)
 		switch rel {
 		case "gate.weight":
-			return get(&moe.gate.w)
+			return lin(&moe.gate)
+		case "experts.gate_up_proj.weight":
+			// stacked blob: raw bf16 copy or f32
+			raw, shape, dt, err := f.Raw(key)
+			if err != nil {
+				return err
+			}
+			_ = shape
+			if dt == safetensors.BF16 {
+				moe.gateUpRaw = raw
+				return nil
+			}
+			v, _, err := f.F32(key)
+			if err != nil {
+				return err
+			}
+			return setF32(&moe.gateUpW, v)
+		case "experts.down_proj.weight":
+			raw, _, dt, err := f.Raw(key)
+			if err != nil {
+				return err
+			}
+			if dt == safetensors.BF16 {
+				moe.downRaw = raw
+				return nil
+			}
+			v, _, err := f.F32(key)
+			if err != nil {
+				return err
+			}
+			return setF32(&moe.downW, v)
 		case "shared_expert.gate_proj.weight":
-			return get(&moe.shared.gate.w)
+			return setLinear(&moe.shared.gate, f, key, rawMode)
 		case "shared_expert.up_proj.weight":
-			return get(&moe.shared.up.w)
+			return setLinear(&moe.shared.up, f, key, rawMode)
 		case "shared_expert.down_proj.weight":
-			return get(&moe.shared.down.w)
+			return setLinear(&moe.shared.down, f, key, rawMode)
 		case "shared_expert_gate.weight":
 			return get(&moe.sharedGate)
 		}
@@ -351,11 +433,11 @@ func loadMLP(cfg *Config, l *block, rel string, f *safetensors.File, key string)
 	d := l.mlp.(*denseMLP)
 	switch rel {
 	case "gate_proj.weight":
-		return get(&d.gate.w)
+		return lin(&d.gate)
 	case "up_proj.weight":
-		return get(&d.up.w)
+		return lin(&d.up)
 	case "down_proj.weight":
-		return get(&d.down.w)
+		return lin(&d.down)
 	}
 	return nil
 }
@@ -383,9 +465,10 @@ func loadQuantized(weightsPath string) (*model, *tokenizer.Tokenizer, error) {
 		}
 	}
 	m := newModel(cfg)
-	if err := m.alloc(quantTargets); err != nil {
+	if err := m.alloc(quantTargets, true); err != nil {
 		return nil, nil, err
 	}
+	m.rawMode = true
 
 	shards, _ := filepath.Glob(filepath.Join(weightsPath, "*.safetensors"))
 	sort.Strings(shards)
@@ -394,11 +477,11 @@ func loadQuantized(weightsPath string) (*model, *tokenizer.Tokenizer, error) {
 		if err != nil {
 			return nil, nil, err
 		}
+		m.closers = append(m.closers, closer)
 		err = m.loadShards(f, shard)
 		if err == nil {
 			err = m.loadQuantTensors(f, shard, &manifest)
 		}
-		closer.Close()
 		if err != nil {
 			return nil, nil, err
 		}

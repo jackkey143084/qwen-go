@@ -4,6 +4,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -14,11 +15,11 @@ import (
 )
 
 const (
-	sysTemplate     = "<|im_start|>system\n%s<|im_end|>\n"
-	userTemplate    = "<|im_start|>user\n%s<|im_end|>\n"
-	assistantOpen   = "<|im_start|>assistant\n"
-	thinkOpen       = "<think>\n"
-	thinkClosed     = "<think>\n\n</think>\n\n"
+	sysTemplate   = "<|im_start|>system\n%s<|im_end|>\n"
+	userTemplate  = "<|im_start|>user\n%s<|im_end|>\n"
+	assistantOpen = "<|im_start|>assistant\n"
+	thinkOpen     = "<think>\n"
+	thinkClosed   = "<think>\n\n</think>\n\n"
 )
 
 func stopTokens(t *tokenizer.Tokenizer) map[int]bool {
@@ -58,10 +59,11 @@ func main() {
 	maxNew := flag.Int("max-new-tokens", 256, "max tokens per reply")
 	system := flag.String("system", "You are a helpful assistant.", "system prompt")
 	think := flag.Bool("think", true, "enable the <think> block in the generation prompt")
+	oneshot := flag.String("prompt", "", "one-shot mode: generate from this raw prompt and print token ids")
 	flag.Parse()
 
 	if *modelDir == "" {
-		fmt.Fprintln(os.Stderr, "usage: tiny-qwen -model <dir> [--max-new-tokens N] [--system ...] [--think=false]")
+		fmt.Fprintln(os.Stderr, "usage: tiny-qwen -model <dir> [--prompt <raw text> | -max-new-tokens N] ...")
 		os.Exit(1)
 	}
 
@@ -72,6 +74,22 @@ func main() {
 		os.Exit(1)
 	}
 	stop := stopTokens(tok)
+
+	if *oneshot != "" {
+		ids := tok.EncodeWithSpecial(*oneshot)
+		fmt.Fprintf(os.Stderr, "prompt tokens (%d): %v\n", len(ids), ids)
+		var got []int
+		err := m.Generate(ids, *maxNew, map[int]bool{}, func(id int) {
+			got = append(got, id)
+		})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "generate:", err)
+			os.Exit(1)
+		}
+		out, _ := json.Marshal(map[string]interface{}{"prompt": ids, "generated": got})
+		fmt.Println(string(out))
+		return
+	}
 
 	sc := bufio.NewScanner(os.Stdout)
 	_ = sc

@@ -1,8 +1,11 @@
 package model
 
 import (
+	"encoding/binary"
 	"fmt"
+	"io"
 	"math"
+	"os"
 )
 
 // ---------------------------------------------------------------------------
@@ -96,51 +99,99 @@ type kvCache struct {
 // ---------------------------------------------------------------------------
 
 type linear struct {
-	w []float32 // (out, in)
+	w      []float32 // dense (out, in) — used when raw is nil
+	raw    []byte    // bf16 storage, (out, in) — memory-dense path
+	outDim int
+	inDim  int
+}
+
+func bf16f32(b []byte) float32 {
+	return math.Float32frombits(uint32(binary.LittleEndian.Uint16(b)) << 16)
+}
+
+func traceCK(name string, x []float32) {
+	if os.Getenv("QWENGO_TRACE") == "" {
+		return
+	}
+	var sum, sq float64
+	for _, v := range x {
+		sum += float64(v)
+		sq += float64(v) * float64(v)
+	}
+	fmt.Fprintf(os.Stderr, "GO %s %.6e %.6e\n", name, sum, sq)
+}
+
+// matvec computes y = x @ W^T for one token, bf16-native when loaded raw.
+func (l *linear) matvec(x []float32, out int) []float32 {
+	if l.raw == nil {
+		return matmulVec(x, l.w, out)
+	}
+	y := make([]float32, out)
+	for o := 0; o < out; o++ {
+		row := l.raw[o*l.inDim*2 : (o+1)*l.inDim*2]
+		var s float32
+		for k, xv := range x {
+			s += xv * bf16f32(row[k*2:])
+		}
+		y[o] = s
+	}
+	return y
+}
+
+// mat2D computes y = x @ W^T over (T, in).
+func (l *linear) mat2D(x []float32, T, out int) []float32 {
+	if T == 1 {
+		return l.matvec(x, out)
+	}
+	if l.raw == nil {
+		return matmul(x, l.w, T, len(x)/T, out)
+	}
+	in := len(x) / T
+	y := make([]float32, T*out)
+	for t := 0; t < T; t++ {
+		copy(y[t*out:(t+1)*out], l.matvec(x[t*in:(t+1)*in], out))
+	}
+	return y
 }
 
 // proj runs a linear over (T, in): quantized wrappers dequantize once for
-// the whole batch (transient), dense weights use the batched matmul.
-func proj(x []float32, T int, w []float32, q *quantLinear, out int) []float32 {
-	in := len(x) / T
+// the whole batch (transient), bf16-native weights convert per element.
+func proj(x []float32, T int, l *linear, q *quantLinear, out int) []float32 {
 	if q != nil {
 		if T == 1 {
 			return q.forward(x)
 		}
 		dw := q.dequantize()
-		return matmul(x, dw, T, in, out)
+		return matmul(x, dw, T, len(x)/T, out)
 	}
-	if T == 1 {
-		return matmulVec(x, w, out)
-	}
-	return matmul(x, w, T, in, out)
+	return l.mat2D(x, T, out)
 }
 
 type selfAttention struct {
-	qProj   linear // out = nHeads*dHead*2 (query + gate)
-	kProj   linear
-	vProj   linear
-	oProj   linear
-	qQuant  *quantLinear
-	kQuant  *quantLinear
-	vQuant  *quantLinear
-	oQuant  *quantLinear
-	qNorm   []float32 // Gemma norm weights, dHead
-	kNorm   []float32
-	nHeads  int
-	nKV     int
-	dHead   int
-	nEmbed  int
-	scale   float32
+	qProj  linear // out = nHeads*dHead*2 (query + gate)
+	kProj  linear
+	vProj  linear
+	oProj  linear
+	qQuant *quantLinear
+	kQuant *quantLinear
+	vQuant *quantLinear
+	oQuant *quantLinear
+	qNorm  []float32 // Gemma norm weights, dHead
+	kNorm  []float32
+	nHeads int
+	nKV    int
+	dHead  int
+	nEmbed int
+	scale  float32
 }
 
 func (a *selfAttention) forward(x []float32, T int, cos, sin []float32, cache *kvCache) []float32 {
 	ne := len(x) / T
 	d := a.dHead
 
-	qg := proj(x, T, a.qProj.w, a.qQuant, a.nHeads*d*2)
-	k := proj(x, T, a.kProj.w, a.kQuant, a.nKV*d)
-	v := proj(x, T, a.vProj.w, a.vQuant, a.nKV*d)
+	qg := proj(x, T, &a.qProj, a.qQuant, a.nHeads*d*2)
+	k := proj(x, T, &a.kProj, a.kQuant, a.nKV*d)
+	v := proj(x, T, &a.vProj, a.vQuant, a.nKV*d)
 
 	// split q/gate per head; norm q heads; rotate q and k
 	q := make([]float32, T*a.nHeads*d)
@@ -214,7 +265,7 @@ func (a *selfAttention) forward(x []float32, T int, cos, sin []float32, cache *k
 	}
 	res := make([]float32, T*ne)
 	for t := 0; t < T; t++ {
-		r := proj(out[t*a.nHeads*d:(t+1)*a.nHeads*d], 1, a.oProj.w, a.oQuant, ne)
+		r := proj(out[t*a.nHeads*d:(t+1)*a.nHeads*d], 1, &a.oProj, a.oQuant, ne)
 		copy(res[t*ne:(t+1)*ne], r)
 	}
 	return res
@@ -260,13 +311,13 @@ type denseMLP struct {
 }
 
 func (m *denseMLP) forward(x []float32) []float32 {
-	g := proj(x, 1, m.gate.w, m.gateQuant, m.nMlp)
-	u := proj(x, 1, m.up.w, m.upQuant, m.nMlp)
+	g := proj(x, 1, &m.gate, m.gateQuant, m.nMlp)
+	u := proj(x, 1, &m.up, m.upQuant, m.nMlp)
 	silu(g)
 	for i := range g {
 		g[i] *= u[i]
 	}
-	return proj(g, 1, m.down.w, m.downQuant, m.nEmbed)
+	return proj(g, 1, &m.down, m.downQuant, m.nEmbed)
 }
 
 // ---------------------------------------------------------------------------
@@ -274,12 +325,12 @@ func (m *denseMLP) forward(x []float32) []float32 {
 // ---------------------------------------------------------------------------
 
 type block struct {
-	layerType             string
-	inputLayernorm        []float32 // Gemma norm
+	layerType              string
+	inputLayernorm         []float32 // Gemma norm
 	postAttentionLayernorm []float32
-	attn                  *selfAttention
-	gdn                   *gatedDeltaNet
-	mlp                   mixer // denseMLP, moeMLP, or quantized wrappers
+	attn                   *selfAttention
+	gdn                    *gatedDeltaNet
+	mlp                    mixer // denseMLP, moeMLP, or quantized wrappers
 }
 
 type mixer interface {
@@ -287,13 +338,15 @@ type mixer interface {
 }
 
 type model struct {
-	cfg    *Config
-	rot    *rotary
-	embed  []float32 // (vocab, nEmbed)
-	layers []block
-	norm   []float32 // final Gemma norm
-	lmHead []float32 // nil when tied
-	tied   bool
+	cfg     *Config
+	rot     *rotary
+	embed   linear // (vocab, nEmbed); bf16 raw or f32
+	layers  []block
+	norm    []float32 // final Gemma norm
+	lmHead  linear    // unused when tied
+	tied    bool
+	rawMode bool        // weights loaded as raw bf16 (no f32 upcast)
+	closers []io.Closer // live shard mmaps (raw slices point into them)
 }
 
 // newModel builds an empty model skeleton from config.
@@ -365,11 +418,20 @@ func (m *model) forward(inputIDs []int, pos []int, caches *layerCaches) ([]float
 		if id < 0 || id >= m.cfg.NVocab {
 			return nil, fmt.Errorf("token id %d out of vocab range", id)
 		}
-		copy(x[t*ne:(t+1)*ne], m.embed[id*ne:(id+1)*ne])
+		// embedding row fetch (no matmul): decode bf16 rows on the fly
+		if m.embed.raw != nil {
+			base := id * ne * 2
+			for i := 0; i < ne; i++ {
+				x[t*ne+i] = bf16f32(m.embed.raw[base+i*2:])
+			}
+		} else {
+			copy(x[t*ne:(t+1)*ne], m.embed.w[id*ne:(id+1)*ne])
+		}
 	}
 	cos, sin := m.rot.cosSin(pos)
 	kvIdx, gdnIdx := 0, 0
 	for i := range m.layers {
+		traceCK(fmt.Sprintf("pre_layer%d", i), x)
 		l := &m.layers[i]
 		var y []float32
 		if l.attn != nil {
@@ -411,10 +473,11 @@ func (m *model) forward(inputIDs []int, pos []int, caches *layerCaches) ([]float
 	}
 	last := x[(T-1)*ne : T*ne]
 	gemmaRMSNormApply(last, m.norm, float32(m.cfg.RmsNormEps))
+	traceCK("finalnorm", x)
 	if m.tied {
-		return matmulVec(last, m.embed, m.cfg.NVocab), nil
+		return m.embed.matvec(last, m.cfg.NVocab), nil
 	}
-	return matmulVec(last, m.lmHead, m.cfg.NVocab), nil
+	return m.lmHead.matvec(last, m.cfg.NVocab), nil
 }
 
 // Generate greedily streams tokens. stop map keys are stop token ids.

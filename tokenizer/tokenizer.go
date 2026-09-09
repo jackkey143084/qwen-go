@@ -18,11 +18,11 @@ import (
 type tokenizerJSON struct {
 	Version string `json:"version"`
 	Model   struct {
-		Type    string              `json:"type"`
-		Vocab   map[string]int      `json:"vocab"`
-		Merges  json.RawMessage     `json:"merges"`
-		BosTok  *string             `json:"bos_token"`
-		EosTok  *string             `json:"eos_token"`
+		Type   string          `json:"type"`
+		Vocab  map[string]int  `json:"vocab"`
+		Merges json.RawMessage `json:"merges"`
+		BosTok *string         `json:"bos_token"`
+		EosTok *string         `json:"eos_token"`
 	} `json:"model"`
 	AddedTokens []struct {
 		ID    int    `json:"id"`
@@ -32,10 +32,10 @@ type tokenizerJSON struct {
 
 // Tokenizer does byte-level BPE over Qwen's pre-tokenization.
 type Tokenizer struct {
-	vocab  map[string]int   // token string -> id
-	byID   map[int]string   // id -> token string
-	merges map[string]int   // "a\x00b" -> rank
-	special map[string]int  // added special tokens
+	vocab   map[string]int // token string -> id
+	byID    map[int]string // id -> token string
+	merges  map[string]int // "a\x00b" -> rank
+	special map[string]int // added special tokens
 }
 
 // Load parses a tokenizer.json file.
@@ -61,11 +61,23 @@ func Load(path string) (*Tokenizer, error) {
 	for tok, id := range t.vocab {
 		t.byID[id] = tok
 	}
-	// merges: list of ["a","b"] (>=1.1 format) or "a b" strings
+	// merges: list of ["a","b"] (>=1.1 format) or "a b" strings (older)
 	var pairs [][2]string
 	if len(tj.Model.Merges) > 0 && tj.Model.Merges[0] == '[' {
 		if err := json.Unmarshal(tj.Model.Merges, &pairs); err != nil {
-			return nil, fmt.Errorf("tokenizer: merges: %w", err)
+			// array of "a b" strings (pre-1.1 / HF export format).
+			// NB: the failed unmarshal leaves len(pairs) empty [2]string
+			// values behind — reset before refilling.
+			pairs = nil
+			var strs []string
+			if err2 := json.Unmarshal(tj.Model.Merges, &strs); err2 != nil {
+				return nil, fmt.Errorf("tokenizer: merges: %w / %v", err, err2)
+			}
+			for _, s := range strs {
+				if i := strings.Index(s, " "); i >= 0 {
+					pairs = append(pairs, [2]string{s[:i], s[i+1:]})
+				}
+			}
 		}
 	} else {
 		var strs []string
@@ -141,7 +153,9 @@ func (t *Tokenizer) bpe(piece string) []int {
 		if bestIdx < 0 {
 			break
 		}
-		syms = append(syms[:bestIdx], syms[bestIdx]+syms[bestIdx+1])
+		// merge in place: replace the pair with its concat, keep the tail
+		syms[bestIdx] = syms[bestIdx] + syms[bestIdx+1]
+		syms = append(syms[:bestIdx+1], syms[bestIdx+2:]...)
 	}
 	out := make([]int, 0, len(syms))
 	for _, s := range syms {
@@ -201,13 +215,14 @@ func (t *Tokenizer) EncodeWithSpecial(text string) []int {
 // Qwen2-style pre-tokenizer, hand-rolled (Go regexp has no lookaheads).
 //
 // The HF pattern, in order:
-//   contractions ('s 't 're 've 'm 'll 'd 'll 've — case-insensitive)
-//   [^\r\n\p{L}\p{N}]?\p{L}+          (optional single punct/space + letters)
-//   \p{N}{1,3}                        (numbers, max 3 per token)
-//    ?[^\s\p{L}\p{N}]+[\r\n]*         (punct runs, optional lead space)
-//   \s*[\r\n]+                        (newlines with lead blanks)
-//   \s+(?!\S)                         (blanks, all but the last)
-//   \s+                               (leftover blanks)
+//
+//	contractions ('s 't 're 've 'm 'll 'd 'll 've — case-insensitive)
+//	[^\r\n\p{L}\p{N}]?\p{L}+          (optional single punct/space + letters)
+//	\p{N}{1,3}                        (numbers, max 3 per token)
+//	 ?[^\s\p{L}\p{N}]+[\r\n]*         (punct runs, optional lead space)
+//	\s*[\r\n]+                        (newlines with lead blanks)
+//	\s+(?!\S)                         (blanks, all but the last)
+//	\s+                               (leftover blanks)
 func preTokenize(text string) []string {
 	var out []string
 	rs := []rune(text)
@@ -246,14 +261,32 @@ func preTokenize(text string) []string {
 			if end > i {
 				out = append(out, string(rs[i:end]))
 			}
-			// leftover single blank: attach to next letters / punct run /
-			// number per the ` ?X` alternatives — handled by the next loop
-			// iteration seeing a space we deliberately re-examine.
+			if end == i {
+				// single blank directly before a word/number/punct: it
+				// prefixes the next token (the ` ?X` alternatives)
+				k := j
+				if k < n && isLetter(rs[k]) {
+					for k < n && isLetter(rs[k]) {
+						k++
+					}
+				} else if k < n && isNumber(rs[k]) {
+					for k < n && k-j < 3 && isNumber(rs[k]) {
+						k++
+					}
+				} else {
+					for k < n && !isSpace(rs[k]) && !isLetter(rs[k]) && !isNumber(rs[k]) {
+						k++
+					}
+				}
+				out = append(out, string(rs[i:k]))
+				i = k
+				continue
+			}
 			i = end
 		default:
 			// contractions (ASCII, case-insensitive)
 			if r == '\'' {
-				if c, l := matchContraction(rs[i:]); l > 0 {
+				if _, l := matchContraction(rs[i:]); l > 0 {
 					out = append(out, string(rs[i:i+l]))
 					i += l
 					continue

@@ -8,9 +8,11 @@ import "math"
 // ---------------------------------------------------------------------------
 
 type moeMLP struct {
-	gate            linear // (nExperts, nEmbed)
+	gate            linear    // (nExperts, nEmbed)
 	gateUpW         []float32 // (nExperts, 2*nMoeMlp, nEmbed)
 	downW           []float32 // (nExperts, nEmbed, nMoeMlp)
+	gateUpRaw       []byte    // bf16 variant of gateUpW
+	downRaw         []byte    // bf16 variant of downW
 	routerQuant     *quantLinear
 	sharedGateQuant *quantLinear
 	sharedGate      []float32 // (1, nEmbed) or nil
@@ -37,7 +39,7 @@ func newMoeMLP(cfg *Config) *moeMLP {
 }
 
 func (m *moeMLP) forward(x []float32) []float32 {
-	logits := proj(x, 1, m.gate.w, m.routerQuant, m.nExperts)
+	logits := proj(x, 1, &m.gate, m.routerQuant, m.nExperts)
 	softmax(logits)
 	// top-k by selection (k is small)
 	idx := make([]int, m.nExperts)
@@ -54,19 +56,29 @@ func (m *moeMLP) forward(x []float32) []float32 {
 		wSum += logits[idx[i]]
 	}
 	out := make([]float32, m.nEmbed)
-	guStride := 2 * m.nMoeMlp * m.nEmbed
+	guStride := 2 * m.nMoeMlp * m.nEmbed // elements per expert
 	dStr := m.nEmbed * m.nMoeMlp
 	for i := 0; i < m.topK; i++ {
 		e := idx[i]
 		w := logits[e] / (wSum + 1e-9)
-		gu := matmulVec(x, m.gateUpW[e*guStride:(e+1)*guStride], m.nMoeMlp*2)
+		var gu []float32
+		if m.gateUpRaw != nil {
+			gu = bf16matvec(x, m.gateUpRaw[e*guStride*2:(e+1)*guStride*2], m.nEmbed, m.nMoeMlp*2)
+		} else {
+			gu = matmulVec(x, m.gateUpW[e*guStride:(e+1)*guStride], m.nMoeMlp*2)
+		}
 		g := gu[:m.nMoeMlp]
 		u := gu[m.nMoeMlp:]
 		silu(g)
 		for j := range g {
 			g[j] *= u[j]
 		}
-		d := matmulVec(g, m.downW[e*dStr:(e+1)*dStr], m.nEmbed)
+		var d []float32
+		if m.downRaw != nil {
+			d = bf16matvec(g, m.downRaw[e*dStr*2:(e+1)*dStr*2], m.nMoeMlp, m.nEmbed)
+		} else {
+			d = matmulVec(g, m.downW[e*dStr:(e+1)*dStr], m.nEmbed)
+		}
 		for j := range out {
 			out[j] += w * d[j]
 		}
@@ -86,6 +98,20 @@ func (m *moeMLP) forward(x []float32) []float32 {
 	return out
 }
 
+// bf16matvec: y = x @ W^T where raw holds W as (out, in) bf16 rows.
+func bf16matvec(x []float32, raw []byte, in, out int) []float32 {
+	y := make([]float32, out)
+	for o := 0; o < out; o++ {
+		row := raw[o*in*2 : (o+1)*in*2]
+		var s float32
+		for k, xv := range x {
+			s += xv * bf16f32(row[k*2:])
+		}
+		y[o] = s
+	}
+	return y
+}
+
 // set by the loader; strides per expert
 var _ = 0
 
@@ -101,7 +127,7 @@ type quantLinear struct {
 	bits        int
 	outFeatures int
 	inFeatures  int
-	qweight     []byte // int8 codes (bits=8) or packed pairs (bits=4)
+	qweight     []byte    // int8 codes (bits=8) or packed pairs (bits=4)
 	scale       []float32 // f16 loaded as f32, (out, in/32)
 }
 

@@ -18,7 +18,7 @@ func tinyConfig() *Config {
 func randModel(t *testing.T, cfg *Config) *model {
 	t.Helper()
 	m := newModel(cfg)
-	if err := m.alloc(nil); err != nil {
+	if err := m.alloc(nil, false); err != nil {
 		t.Fatal(err)
 	}
 	rng := rand.New(rand.NewSource(42))
@@ -27,8 +27,8 @@ func randModel(t *testing.T, cfg *Config) *model {
 			f[i] = (rng.Float32()*2 - 1) * float32(0.05)
 		}
 	}
-	for i := range m.embed {
-		m.embed[i] = (rng.Float32()*2 - 1) * 0.1
+	for i := range m.embed.w {
+		m.embed.w[i] = (rng.Float32()*2 - 1) * 0.1
 	}
 	norm(m.norm)
 	for li := range m.layers {
