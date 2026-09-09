@@ -3,6 +3,7 @@ package model
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -11,6 +12,14 @@ import (
 	"tinyqwengo/safetensors"
 	"tinyqwengo/tokenizer"
 )
+
+// OpenShard memory-maps a safetensors shard for callers that want the loader's
+// zero-copy behavior without going through FromPretrained (e.g. cmd/qwen-quant
+// reads shards directly to emit a quantized directory). The returned closer
+// releases the mapping when done.
+func OpenShard(path string) (*safetensors.File, io.Closer, error) {
+	return openShard(path)
+}
 
 // Loading: HF-format directory of safetensors shards, or a quantize.py-style
 // directory (detected by quant.json). mmap is used for shard reading on

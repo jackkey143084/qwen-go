@@ -227,6 +227,17 @@ func quantLinearFromDense(w []float32, outDim, inDim, bits int) *quantLinear {
 	return q
 }
 
+// QuantizeInt8 / QuantizeInt4 are exported wrappers so cmd/qwen-quant can emit
+// the same packed format the loader consumes. (out,in) f32 -> int8 codes +
+// f32 group scales. inDim must be a multiple of 32.
+func QuantizeInt8(w []float32, outDim, inDim int) ([]byte, []float32) {
+	return quantizeInt8(w, outDim, inDim)
+}
+
+func QuantizeInt4(w []float32, outDim, inDim int) ([]byte, []float32) {
+	return quantizeInt4(w, outDim, inDim)
+}
+
 func abs32(x float32) float32 {
 	if x < 0 {
 		return -x
