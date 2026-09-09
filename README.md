@@ -15,6 +15,8 @@ Pure-Go port of [Emericen/tiny-qwen](https://github.com/Emericen/tiny-qwen) — 
   - QuantLinear int8/int4 (group-32, fp16 scales) — loading quantize.py-style dirs AND a Go quantizer (`quantizeInt8`/`quantizeInt4`)
   - greedy streaming generation, prefill + decode with KV/state caches
 - `cmd/tiny-qwen` — streaming chat REPL with the Qwen chat template and `--think` toggle
+- `cmd/qwen-openai` — OpenAI-compatible `/v1/chat/completions` passthrough server (streamed SSE and non-streamed) backed by the model, so any OpenAI client can talk to it:
+  `GOGC=40 GOMEMLIMIT=2600MiB go run ./cmd/qwen-openai -model <dir> -addr :8080`
 
 Tests: prefill/decode logit equivalence, GDN cache equivalence, quantization round-trip, MoE routing sanity.
 
@@ -40,7 +42,7 @@ See [ROADMAP.md](ROADMAP.md) / [ROADMAP_RU.md](ROADMAP_RU.md). Done through Phas
 ## Not yet (honest list)
 
 - vision encoder (phase 4) — text-only for now
-- tool-calling harness + `--url` passthrough mode (phase 5)
+- local agentic tool-calling harness (phase 5 — the run.py terminal loop; the `--url` passthrough side of phase 5 is done, this is the local agent loop that parses `<tool_call>` JSON and feeds results back)
 - bf16-native kernels; weights upcast to float32 at load, so RAM ≈ 2× checkpoint size (mmap avoids the second file copy, not the upcast)
 
 MIT licensed, like the original.

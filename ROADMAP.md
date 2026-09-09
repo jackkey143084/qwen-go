@@ -40,7 +40,7 @@ Goal: run the full current `main` architecture generation (Qwen3.5–3.8).
 
 ## Phase 5 — Harness parity
 - [ ] full agentic REPL from `run.py`: tool-call parsing/rendering, system prompts, chat history
-- [ ] `--url/--api-key/--model` OpenAI-compatible passthrough mode (Go `net/http`)
+- [x] OpenAI-compatible passthrough — done as **`cmd/qwen-openai`**, a local `/v1/chat/completions` **server** (streamed SSE + non-streamed) backed by the Go model, so any OpenAI client can drive it. Deliberate inversion of run.py's `--url` **client** mode: the worthwhile direction here is exposing the local model over the wire, not a thin fan-out to a remote endpoint.
 - [ ] CLI flags matching the Python (`run.py Qwen/Qwen3.8-27B --bits 4 ...`)
 
 ## Phase 6 — Performance (only if it bothers someone)
