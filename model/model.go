@@ -548,6 +548,16 @@ func (m *model) generate(inputIDs []int, pixels []float32, grid ImageGrid, maxNe
 		if err != nil {
 			return err
 		}
+		if os.Getenv("QWENGO_TRACE") != "" {
+			var s, sq float64
+			for _, sec := range pos3 {
+				for _, p := range sec {
+					s += float64(p)
+					sq += float64(p) * float64(p)
+				}
+			}
+			fmt.Printf("GO position_ids %.6e %.6e\n", s, sq)
+		}
 	} else {
 		pos := make([]int, len(inputIDs))
 		for i := range pos {
@@ -570,6 +580,11 @@ func (m *model) generate(inputIDs []int, pixels []float32, grid ImageGrid, maxNe
 	nextPos := maxPos + 1
 	for step := 0; step < maxNew; step++ {
 		tok := argmax(logits)
+		if os.Getenv("QWENGO_TRACE") != "" {
+			best := logits[tok]
+			second := logits[argmax2nd(logits)]
+			fmt.Printf("GO step %d top %d %.4f 2nd %d %.4f gap %.4f\n", step, tok, best, argmax2nd(logits), second, best-second)
+		}
 		emit(tok)
 		if stop[tok] {
 			return nil
@@ -648,4 +663,20 @@ func argmax(v []float32) int {
 // prompt. pixels/grid come from model.ProcessImage.
 func (m *model) GenerateWithImage(inputIDs []int, pixels []float32, grid ImageGrid, maxNew int, stop map[int]bool, emit func(int)) error {
 	return m.generate(inputIDs, pixels, grid, maxNew, stop, emit)
+}
+
+func argmax2nd(v []float32) int {
+	best := argmax(v)
+	second := -1
+	var bv float32 = -1e30
+	for i, x := range v {
+		if i == best {
+			continue
+		}
+		if x > bv {
+			bv = x
+			second = i
+		}
+	}
+	return second
 }

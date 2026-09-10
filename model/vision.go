@@ -522,7 +522,7 @@ func geluErf(v float32) float32 {
 
 func geluTanh(v float32) float32 {
 	vf := float64(v)
-	return float32(0.5 * vf * (1 + math.Tanh(math.Sqrt2/math.Pi*(vf+0.044715*vf*vf*vf))))
+	return float32(0.5 * vf * (1 + math.Tanh(math.Sqrt(2/math.Pi)*(vf+0.044715*vf*vf*vf))))
 }
 
 func layerNorm(x, w, b []float32, eps float64) []float32 {

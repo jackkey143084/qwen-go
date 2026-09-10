@@ -183,12 +183,18 @@ func resizeVertical8(src []uint8, inH, width, outH int) []uint8 {
 		}
 		taps := xmax - xmin
 		ki := make([]int32, taps)
+		var ww float64
+		ws := make([]float64, taps)
 		for x := 0; x < taps; x++ {
-			w := cubicKernel((float64(x+xmin)-center+0.5)*invFS) * (1 << precisionBits)
+			ws[x] = cubicKernel((float64(x+xmin) - center + 0.5) * invFS)
+			ww += ws[x]
+		}
+		for x := 0; x < taps; x++ {
+			w := (ws[x] / ww) * (1 << precisionBits)
 			if w < 0 {
-				ki[x] = int32(w - 0.5)
+				ki[x] = int32(-0.5 + w)
 			} else {
-				ki[x] = int32(w + 0.5)
+				ki[x] = int32(0.5 + w)
 			}
 		}
 		rnd := int32(1) << (precisionBits - 1)
@@ -234,15 +240,19 @@ func resizeAxis8(src []uint8, rows, inLen, outLen, ch int) []uint8 {
 		}
 		taps := xmax - xmin
 		ki := make([]int32, taps)
-		sum := 0
+		var ww float64
+		ws := make([]float64, taps)
 		for x := 0; x < taps; x++ {
-			w := cubicKernel((float64(x+xmin)-center+0.5)*invFS) * (1 << precisionBits)
+			ws[x] = cubicKernel((float64(x+xmin) - center + 0.5) * invFS)
+			ww += ws[x]
+		}
+		for x := 0; x < taps; x++ {
+			w := (ws[x] / ww) * (1 << precisionBits)
 			if w < 0 {
-				ki[x] = int32(w - 0.5)
+				ki[x] = int32(-0.5 + w)
 			} else {
-				ki[x] = int32(w + 0.5)
+				ki[x] = int32(0.5 + w)
 			}
-			sum += int(ki[x])
 		}
 		rnd := int32(1) << (precisionBits - 1)
 		for r := 0; r < rows; r++ {
