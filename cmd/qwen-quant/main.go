@@ -31,15 +31,15 @@ const quantGroup = 32 // same group size the loader/quantizer use
 
 // plan describes one tensor to emit in the output file.
 type plan struct {
-	name    string          // flat output key
-	shape   []int
-	dtype   safetensors.Dtype
-	payloadLen int         // raw bytes to write
-	shard   string          // source shard path
-	srcKey  string          // source key within shard
-	quant   bool            // if true, f32->quantize instead of raw passthrough
-	bits    int
-	scaleLen int           // payloadLen of the .scale tensor (0 if not quant)
+	name       string // flat output key
+	shape      []int
+	dtype      safetensors.Dtype
+	payloadLen int    // raw bytes to write
+	shard      string // source shard path
+	srcKey     string // source key within shard
+	quant      bool   // if true, f32->quantize instead of raw passthrough
+	bits       int
+	scaleLen   int // payloadLen of the .scale tensor (0 if not quant)
 }
 
 // quantizeBaseNames returns the set of flat tensor base names (prefix before

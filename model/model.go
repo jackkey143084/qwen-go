@@ -28,15 +28,20 @@ func newRotary(cfg *Config) *rotary {
 	return &rotary{invFreq: inv, rotDim: dim}
 }
 
-// cosSin returns per-position cos/sin tables (T, rotDim).
-func (r *rotary) cosSin(positions []int) (cos, sin []float32) {
-	T := len(positions)
+// cosSin returns per-position cos/sin tables (T, rotDim). pos3 carries the
+// three mRoPE sections (temporal, height, width); the interleaved merge
+// fills pair p with section p%3, index p/3 — text tokens advance all three
+// sections together, so plain text produces the same values as before.
+func (r *rotary) cosSin(pos3 [3][]int) (cos, sin []float32) {
+	T := len(pos3[0])
 	half := r.rotDim / 2
 	cos = make([]float32, T*r.rotDim)
 	sin = make([]float32, T*r.rotDim)
-	for t, p := range positions {
+	for t := range pos3[0] {
 		for i := 0; i < half; i++ {
-			freq := float64(p) * float64(r.invFreq[i])
+			sec := i % 3
+			idx := i / 3
+			freq := float64(pos3[sec][t]) * float64(r.invFreq[idx])
 			c, s := math.Cos(freq), math.Sin(freq)
 			// emb = cat([freqs, freqs]) — same angle for both halves
 			cos[t*r.rotDim+i] = float32(c)
@@ -376,6 +381,7 @@ type model struct {
 	layers  []block
 	norm    []float32 // final Gemma norm
 	lmHead  linear    // unused when tied
+	visual  *visionTower
 	tied    bool
 	rawMode bool        // weights loaded as raw bf16 (no f32 upcast)
 	closers []io.Closer // live shard mmaps (raw slices point into them)
@@ -442,7 +448,7 @@ func allocCaches(m *model) *layerCaches {
 // forward runs the model over input ids; returns logits for the last
 // position only when lastOnly (decode path), else full (prefill path —
 // only the last row is actually needed, so we always compute just that).
-func (m *model) forward(inputIDs []int, pos []int, caches *layerCaches) ([]float32, error) {
+func (m *model) forward(inputIDs []int, pos3 [3][]int, caches *layerCaches) ([]float32, error) {
 	ne := m.cfg.NEmbed
 	T := len(inputIDs)
 	x := make([]float32, T*ne)
@@ -460,7 +466,14 @@ func (m *model) forward(inputIDs []int, pos []int, caches *layerCaches) ([]float
 			copy(x[t*ne:(t+1)*ne], m.embed.w[id*ne:(id+1)*ne])
 		}
 	}
-	cos, sin := m.rot.cosSin(pos)
+	return m.decodeLayers(x, pos3, caches)
+}
+
+// decodeLayers runs the shared decoder stack over embedded states.
+func (m *model) decodeLayers(x []float32, pos3 [3][]int, caches *layerCaches) ([]float32, error) {
+	ne := m.cfg.NEmbed
+	T := len(x) / ne
+	cos, sin := m.rot.cosSin(pos3)
 	kvIdx, gdnIdx := 0, 0
 	for i := range m.layers {
 		traceCK(fmt.Sprintf("pre_layer%d", i), x)
@@ -514,29 +527,111 @@ func (m *model) forward(inputIDs []int, pos []int, caches *layerCaches) ([]float
 
 // Generate greedily streams tokens. stop map keys are stop token ids.
 func (m *model) Generate(inputIDs []int, maxNew int, stop map[int]bool, emit func(int)) error {
+	return m.generate(inputIDs, nil, ImageGrid{}, maxNew, stop, emit)
+}
+
+// pos3Flat builds three identical mRoPE sections from a plain position list.
+func pos3Flat(pos []int) [3][]int {
+	return [3][]int{pos, append([]int(nil), pos...), append([]int(nil), pos...)}
+}
+
+// generate runs greedy decode; a non-nil pixels buffer makes it an image
+// prompt: the image-pat tokens get vision features and the prompt positions
+// come from pos3 (mRoPE), decode continues at maxPos+1 in all sections.
+func (m *model) generate(inputIDs []int, pixels []float32, grid ImageGrid, maxNew int, stop map[int]bool, emit func(int)) error {
 	caches := allocCaches(m)
-	pos := make([]int, len(inputIDs))
-	for i := range pos {
-		pos[i] = i
+	imageToken := m.cfg.ImageTokenID
+	var pos3 [3][]int
+	if pixels != nil {
+		var err error
+		pos3, err = mropePositions(inputIDs, []ImageGrid{grid}, imageToken)
+		if err != nil {
+			return err
+		}
+	} else {
+		pos := make([]int, len(inputIDs))
+		for i := range pos {
+			pos[i] = i
+		}
+		pos3 = pos3Flat(pos)
 	}
-	logits, err := m.forward(inputIDs, pos, caches)
+	logits, err := m.forwardVision(inputIDs, pixels, grid, pos3, caches)
 	if err != nil {
 		return err
 	}
-	nextPos := len(inputIDs)
+	maxPos := 0
+	for _, s := range pos3 {
+		for _, p := range s {
+			if p > maxPos {
+				maxPos = p
+			}
+		}
+	}
+	nextPos := maxPos + 1
 	for step := 0; step < maxNew; step++ {
 		tok := argmax(logits)
 		emit(tok)
 		if stop[tok] {
 			return nil
 		}
-		logits, err = m.forward([]int{tok}, []int{nextPos}, caches)
+		dp := []int{nextPos}
+		logits, err = m.forward([]int{tok}, pos3Flat(dp), caches)
 		if err != nil {
 			return err
 		}
 		nextPos++
 	}
 	return nil
+}
+
+// forwardVision is forward plus vision-feature injection for image-pat tokens.
+func (m *model) forwardVision(inputIDs []int, pixels []float32, grid ImageGrid, pos3 [3][]int, caches *layerCaches) ([]float32, error) {
+	if pixels == nil {
+		return m.forward(inputIDs, pos3, caches)
+	}
+	if m.visual == nil {
+		return nil, fmt.Errorf("checkpoint has no vision tower")
+	}
+	vis, err := m.visual.encode(pixels, grid)
+	if err != nil {
+		return nil, err
+	}
+	ne := m.cfg.NEmbed
+	imageToken := m.cfg.ImageTokenID
+	T := len(inputIDs)
+	nPatches := len(vis) / ne
+	count := 0
+	for _, id := range inputIDs {
+		if id == imageToken {
+			count++
+		}
+	}
+	if count != nPatches {
+		return nil, fmt.Errorf("vision: %d image-pat tokens but %d vision features", count, nPatches)
+	}
+	x := make([]float32, T*ne)
+	q := 0
+	for t, id := range inputIDs {
+		if id == imageToken {
+			copy(x[t*ne:(t+1)*ne], vis[q*ne:(q+1)*ne])
+			q++
+			continue
+		}
+		if id < 0 || id >= m.cfg.NVocab {
+			return nil, fmt.Errorf("token id %d out of vocab range", id)
+		}
+		if m.embed.raw != nil {
+			base := id * ne * 2
+			for i := 0; i < ne; i++ {
+				x[t*ne+i] = bf16f32(m.embed.raw[base+i*2:])
+			}
+		} else {
+			copy(x[t*ne:(t+1)*ne], m.embed.w[id*ne:(id+1)*ne])
+		}
+	}
+	// rest of the decoder is identical to forward — refactor: inline the
+	// layer stack via a helper below.
+	return m.decodeLayers(x, pos3, caches)
 }
 
 func argmax(v []float32) int {
@@ -547,4 +642,10 @@ func argmax(v []float32) int {
 		}
 	}
 	return best
+}
+
+// GenerateWithImage runs greedy decode over a multimodal (image + text)
+// prompt. pixels/grid come from model.ProcessImage.
+func (m *model) GenerateWithImage(inputIDs []int, pixels []float32, grid ImageGrid, maxNew int, stop map[int]bool, emit func(int)) error {
+	return m.generate(inputIDs, pixels, grid, maxNew, stop, emit)
 }

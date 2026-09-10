@@ -10,29 +10,30 @@ import (
 // Config is the text-model configuration, ported from tiny-qwen's
 // ModelConfig. Fields follow HF Qwen config.json naming.
 type Config struct {
-	NEmbed              int      `json:"hidden_size"`
-	NHeads              int      `json:"num_attention_heads"`
-	NKVHeads            int      `json:"num_key_value_heads"`
-	NLayer              int      `json:"num_hidden_layers"`
-	NMlp                int      `json:"-"` // resolved from intermediate_size fallbacks
-	NVocab              int      `json:"vocab_size"`
-	TieWordEmbeddings   bool     `json:"-"`
-	RopeTheta           float64  `json:"-"`
-	RmsNormEps          float64  `json:"-"`
-	DHead               int      `json:"head_dim"`
-	NExperts            int      `json:"num_experts"`
-	NExpertsPerToken    int      `json:"num_experts_per_tok"`
-	NMoeMlp             int      `json:"moe_intermediate_size"`
-	NSharedExpertMlp    int      `json:"shared_expert_intermediate_size"`
-	LayerTypes          []string `json:"layer_types"`
-	NLinearKHeads       int      `json:"linear_num_key_heads"`
-	NLinearVHeads       int      `json:"linear_num_value_heads"`
-	DLinearK            int      `json:"linear_key_head_dim"`
-	DLinearV            int      `json:"linear_value_head_dim"`
-	LinearConvKernel    int      `json:"linear_conv_kernel_dim"`
-	PartialRotaryFactor float64  `json:"-"`
-	MropeSection        []int    `json:"-"`
-	ImageTokenID        int      `json:"image_token_id"`
+	VisionConfigMap     map[string]any `json:"vision_config"`
+	NEmbed              int            `json:"hidden_size"`
+	NHeads              int            `json:"num_attention_heads"`
+	NKVHeads            int            `json:"num_key_value_heads"`
+	NLayer              int            `json:"num_hidden_layers"`
+	NMlp                int            `json:"-"` // resolved from intermediate_size fallbacks
+	NVocab              int            `json:"vocab_size"`
+	TieWordEmbeddings   bool           `json:"-"`
+	RopeTheta           float64        `json:"-"`
+	RmsNormEps          float64        `json:"-"`
+	DHead               int            `json:"head_dim"`
+	NExperts            int            `json:"num_experts"`
+	NExpertsPerToken    int            `json:"num_experts_per_tok"`
+	NMoeMlp             int            `json:"moe_intermediate_size"`
+	NSharedExpertMlp    int            `json:"shared_expert_intermediate_size"`
+	LayerTypes          []string       `json:"layer_types"`
+	NLinearKHeads       int            `json:"linear_num_key_heads"`
+	NLinearVHeads       int            `json:"linear_num_value_heads"`
+	DLinearK            int            `json:"linear_key_head_dim"`
+	DLinearV            int            `json:"linear_value_head_dim"`
+	LinearConvKernel    int            `json:"linear_conv_kernel_dim"`
+	PartialRotaryFactor float64        `json:"-"`
+	MropeSection        []int          `json:"-"`
+	ImageTokenID        int            `json:"image_token_id"`
 }
 
 // ropeParameters mirrors Qwen3.5's nested rope_parameters block.

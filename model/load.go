@@ -78,14 +78,33 @@ func FromPretrained(weightsPath string) (*model, *tokenizer.Tokenizer, error) {
 	}
 	// NB: shard mmaps are intentionally kept open — raw weight slices point
 	// into the mapped pages.
+	var shardFiles []*safetensors.File
 	for _, shard := range shards {
 		f, closer, err := openShard(shard)
 		if err != nil {
 			return nil, nil, err
 		}
 		m.closers = append(m.closers, closer)
+		shardFiles = append(shardFiles, f)
 		if err := m.loadShards(f, shard); err != nil {
 			return nil, nil, err
+		}
+	}
+
+	// vision tower, if the checkpoint carries one
+	visErr := error(nil)
+	for _, f := range shardFiles {
+		for _, k := range f.Keys() {
+			if strings.HasPrefix(k, "model.visual.") {
+				m.visual, visErr = newVisionTower(m, shardFiles)
+				if visErr != nil {
+					return nil, nil, visErr
+				}
+				break
+			}
+		}
+		if m.visual != nil {
+			break
 		}
 	}
 

@@ -75,18 +75,18 @@ func TestPrefillDecodeEquivalence(t *testing.T) {
 	ids := []int{5, 17, 3, 99, 42}
 	caches := allocCaches(m)
 	pos := []int{0, 1, 2, 3, 4}
-	full, err := m.forward(ids, pos, caches)
+	full, err := m.forward(ids, pos3Flat(pos), caches)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// decode path: prefill 4, then one step
 	c2 := allocCaches(m)
-	l4, err := m.forward(ids[:4], pos[:4], c2)
+	l4, err := m.forward(ids[:4], pos3Flat(pos[:4]), c2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	l5, err := m.forward(ids[4:5], []int{4}, c2)
+	l5, err := m.forward(ids[4:5], pos3Flat([]int{4}), c2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,15 +160,15 @@ func TestGDNCacheEquivalence(t *testing.T) {
 
 	ids := []int{1, 2, 3, 4, 5}
 	c1 := allocCaches(m)
-	full, err := m.forward(ids, []int{0, 1, 2, 3, 4}, c1)
+	full, err := m.forward(ids, pos3Flat([]int{0, 1, 2, 3, 4}), c1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	c2 := allocCaches(m)
-	if _, err := m.forward(ids[:4], []int{0, 1, 2, 3}, c2); err != nil {
+	if _, err := m.forward(ids[:4], pos3Flat([]int{0, 1, 2, 3}), c2); err != nil {
 		t.Fatal(err)
 	}
-	dec, err := m.forward(ids[4:5], []int{4}, c2)
+	dec, err := m.forward(ids[4:5], pos3Flat([]int{4}), c2)
 	if err != nil {
 		t.Fatal(err)
 	}

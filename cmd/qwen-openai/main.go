@@ -6,7 +6,7 @@
 // OpenAI wire protocol locally so any OpenAI-compatible client (curl, python
 // openai, other agents) can talk to the model directly.
 //
-//   GOGC=40 GOMEMLIMIT=2600MiB go run ./cmd/qwen-openai -model <dir> -addr :8080
+//	GOGC=40 GOMEMLIMIT=2600MiB go run ./cmd/qwen-openai -model <dir> -addr :8080
 //
 // Supports non-streamed and streamed (SSE) completions, n=1, and the Qwen chat
 // template. temperature/max_tokens are accepted for wire compatibility; the
@@ -39,12 +39,12 @@ const (
 // --- OpenAI wire types -----------------------------------------------------
 
 type chatReq struct {
-	Model      string    `json:"model"`
-	Messages   []message `json:"messages"`
-	Stream     bool      `json:"stream"`
-	MaxTokens  int       `json:"max_tokens"`
-	MaxNew     *int      `json:"max_new_tokens"`
-	Temperature float64  `json:"temperature"`
+	Model       string    `json:"model"`
+	Messages    []message `json:"messages"`
+	Stream      bool      `json:"stream"`
+	MaxTokens   int       `json:"max_tokens"`
+	MaxNew      *int      `json:"max_new_tokens"`
+	Temperature float64   `json:"temperature"`
 }
 
 // content is a string or a list of text blocks ({type,text}). Unmarshal into
@@ -79,9 +79,9 @@ func (r *chatReq) textOf(i int) string {
 }
 
 type message struct {
-	Role      string          `json:"role"`
-	Content   json.RawMessage `json:"content"`
-	ToolCallID string         `json:"tool_call_id"`
+	Role       string          `json:"role"`
+	Content    json.RawMessage `json:"content"`
+	ToolCallID string          `json:"tool_call_id"`
 }
 
 // ---------------------------------------------------------------------------
