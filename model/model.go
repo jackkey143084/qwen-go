@@ -122,20 +122,52 @@ func traceCK(name string, x []float32) {
 }
 
 // matvec computes y = x @ W^T for one token, bf16-native when loaded raw.
+// Parallelized across output rows — the LM head alone is 248k rows × 1k.
 func (l *linear) matvec(x []float32, out int) []float32 {
 	if l.raw == nil {
 		return matmulVec(x, l.w, out)
 	}
 	y := make([]float32, out)
-	for o := 0; o < out; o++ {
-		row := l.raw[o*l.inDim*2 : (o+1)*l.inDim*2]
+	const minWork = 1 << 16
+	if out*l.inDim < minWork {
+		matvecRange(x, l.raw, y, l.inDim, out, 0, out)
+		return y
+	}
+	workers := runtimeNumWorkers()
+	chunk := (out + workers - 1) / workers
+	done := make(chan struct{}, workers)
+	spawned := 0
+	for i := 0; i < workers; i++ {
+		lo := i * chunk
+		hi := lo + chunk
+		if hi > out {
+			hi = out
+		}
+		if lo >= hi {
+			break
+		}
+		spawned++
+		go func(lo, hi int) {
+			defer func() { done <- struct{}{} }()
+			matvecRange(x, l.raw, y, l.inDim, out, lo, hi)
+		}(lo, hi)
+	}
+	for i := 0; i < spawned; i++ {
+		<-done
+	}
+	return y
+}
+
+// matvecRange computes rows [lo, hi) of y = x @ W^T with W in bf16.
+func matvecRange(x []float32, raw []byte, y []float32, in, out, lo, hi int) {
+	for o := lo; o < hi; o++ {
+		row := raw[o*in*2 : (o+1)*in*2]
 		var s float32
 		for k, xv := range x {
 			s += xv * bf16f32(row[k*2:])
 		}
 		y[o] = s
 	}
-	return y
 }
 
 // mat2D computes y = x @ W^T over (T, in).

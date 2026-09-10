@@ -11,7 +11,31 @@ import (
 	"tinyqwengo/safetensors"
 )
 
-// openShard memory-maps a safetensors shard instead of reading it into the
+// openShard reads a safetensors shard. Default is a plain heap read: under
+// a tight cgroup limit the kernel evicts mmap page cache between decode
+// steps and generation becomes disk-bound on re-faults — a resident heap
+// copy is faster even though it costs RSS. Set QWENGO_MMAP=1 for the mmap
+// path (FreeBSD nicety: shared page cache between processes, no heap copy).
+func openShard(path string) (*safetensors.File, io.Closer, error) {
+	if os.Getenv("QWENGO_MMAP") == "1" {
+		return openShardMmap(path)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	f, err := safetensors.Parse(raw)
+	if err != nil {
+		return nil, nil, err
+	}
+	return f, nopCloser{}, nil
+}
+
+type nopCloser struct{}
+
+func (nopCloser) Close() error { return nil }
+
+// openShardMmap memory-maps the shard file instead of reading it into the
 // heap. On FreeBSD this means:
 //   - the kernel pages weights in from the unified buffer cache on demand,
 //     so two processes running the same model share physical RAM;
@@ -22,7 +46,7 @@ import (
 //
 // The converted tensors are still owned copies; the mapping is dropped right
 // after loading.
-func openShard(path string) (*safetensors.File, io.Closer, error) {
+func openShardMmap(path string) (*safetensors.File, io.Closer, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, nil, err

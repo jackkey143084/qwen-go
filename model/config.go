@@ -10,29 +10,29 @@ import (
 // Config is the text-model configuration, ported from tiny-qwen's
 // ModelConfig. Fields follow HF Qwen config.json naming.
 type Config struct {
-	NEmbed             int     `json:"hidden_size"`
-	NHeads             int     `json:"num_attention_heads"`
-	NKVHeads           int     `json:"num_key_value_heads"`
-	NLayer             int     `json:"num_hidden_layers"`
-	NMlp               int     `json:"-"` // resolved from intermediate_size fallbacks
-	NVocab             int     `json:"vocab_size"`
-	TieWordEmbeddings  bool    `json:"-"`
-	RopeTheta          float64 `json:"-"`
-	RmsNormEps         float64 `json:"-"`
-	DHead              int     `json:"head_dim"`
-	NExperts           int     `json:"num_experts"`
-	NExpertsPerToken   int     `json:"num_experts_per_tok"`
-	NMoeMlp            int     `json:"moe_intermediate_size"`
-	NSharedExpertMlp   int     `json:"shared_expert_intermediate_size"`
-	LayerTypes         []string `json:"layer_types"`
-	NLinearKHeads      int     `json:"linear_num_key_heads"`
-	NLinearVHeads      int     `json:"linear_num_value_heads"`
-	DLinearK           int     `json:"linear_key_head_dim"`
-	DLinearV           int     `json:"linear_value_head_dim"`
-	LinearConvKernel   int     `json:"linear_conv_kernel_dim"`
-	PartialRotaryFactor float64 `json:"-"`
-	MropeSection       []int   `json:"-"`
-	ImageTokenID       int     `json:"image_token_id"`
+	NEmbed              int      `json:"hidden_size"`
+	NHeads              int      `json:"num_attention_heads"`
+	NKVHeads            int      `json:"num_key_value_heads"`
+	NLayer              int      `json:"num_hidden_layers"`
+	NMlp                int      `json:"-"` // resolved from intermediate_size fallbacks
+	NVocab              int      `json:"vocab_size"`
+	TieWordEmbeddings   bool     `json:"-"`
+	RopeTheta           float64  `json:"-"`
+	RmsNormEps          float64  `json:"-"`
+	DHead               int      `json:"head_dim"`
+	NExperts            int      `json:"num_experts"`
+	NExpertsPerToken    int      `json:"num_experts_per_tok"`
+	NMoeMlp             int      `json:"moe_intermediate_size"`
+	NSharedExpertMlp    int      `json:"shared_expert_intermediate_size"`
+	LayerTypes          []string `json:"layer_types"`
+	NLinearKHeads       int      `json:"linear_num_key_heads"`
+	NLinearVHeads       int      `json:"linear_num_value_heads"`
+	DLinearK            int      `json:"linear_key_head_dim"`
+	DLinearV            int      `json:"linear_value_head_dim"`
+	LinearConvKernel    int      `json:"linear_conv_kernel_dim"`
+	PartialRotaryFactor float64  `json:"-"`
+	MropeSection        []int    `json:"-"`
+	ImageTokenID        int      `json:"image_token_id"`
 }
 
 // ropeParameters mirrors Qwen3.5's nested rope_parameters block.
@@ -43,28 +43,28 @@ type ropeParameters struct {
 }
 
 type llmConfig struct {
-	HiddenSize          int            `json:"hidden_size"`
-	NumAttentionHeads   int            `json:"num_attention_heads"`
-	NumKeyValueHeads    int            `json:"num_key_value_heads"`
-	NumHiddenLayers     int            `json:"num_hidden_layers"`
-	VocabSize           int            `json:"vocab_size"`
-	HeadDim             int            `json:"head_dim"`
-	RmsNormEps          float64        `json:"rms_norm_eps"`
-	RopeTheta           float64        `json:"rope_theta"`
-	RopeParameters      *ropeParameters `json:"rope_parameters"`
-	IntermediateSize    *int           `json:"intermediate_size"`
-	MoeIntermediateSize *int           `json:"moe_intermediate_size"`
-	SharedExpertIntermediateSize *int  `json:"shared_expert_intermediate_size"`
-	NumExperts          int            `json:"num_experts"`
-	NumExpertsPerTok    int            `json:"num_experts_per_tok"`
-	LayerTypes          []string       `json:"layer_types"`
-	LinearNumKeyHeads   int            `json:"linear_num_key_heads"`
-	LinearNumValueHeads int            `json:"linear_num_value_heads"`
-	LinearKeyHeadDim    int            `json:"linear_key_head_dim"`
-	LinearValueHeadDim  int            `json:"linear_value_head_dim"`
-	LinearConvKernelDim int            `json:"linear_conv_kernel_dim"`
-	PartialRotaryFactor float64        `json:"partial_rotary_factor"`
-	MropeSection        []int          `json:"mrope_section"`
+	HiddenSize                   int             `json:"hidden_size"`
+	NumAttentionHeads            int             `json:"num_attention_heads"`
+	NumKeyValueHeads             int             `json:"num_key_value_heads"`
+	NumHiddenLayers              int             `json:"num_hidden_layers"`
+	VocabSize                    int             `json:"vocab_size"`
+	HeadDim                      int             `json:"head_dim"`
+	RmsNormEps                   float64         `json:"rms_norm_eps"`
+	RopeTheta                    float64         `json:"rope_theta"`
+	RopeParameters               *ropeParameters `json:"rope_parameters"`
+	IntermediateSize             *int            `json:"intermediate_size"`
+	MoeIntermediateSize          *int            `json:"moe_intermediate_size"`
+	SharedExpertIntermediateSize *int            `json:"shared_expert_intermediate_size"`
+	NumExperts                   int             `json:"num_experts"`
+	NumExpertsPerTok             int             `json:"num_experts_per_tok"`
+	LayerTypes                   []string        `json:"layer_types"`
+	LinearNumKeyHeads            int             `json:"linear_num_key_heads"`
+	LinearNumValueHeads          int             `json:"linear_num_value_heads"`
+	LinearKeyHeadDim             int             `json:"linear_key_head_dim"`
+	LinearValueHeadDim           int             `json:"linear_value_head_dim"`
+	LinearConvKernelDim          int             `json:"linear_conv_kernel_dim"`
+	PartialRotaryFactor          float64         `json:"partial_rotary_factor"`
+	MropeSection                 []int           `json:"mrope_section"`
 }
 
 // ReadConfig parses config.json from a model directory, handling both the
@@ -93,26 +93,26 @@ func ReadConfig(modelPath string) (*Config, error) {
 	}
 
 	cfg := &Config{
-		NEmbed:           lc.HiddenSize,
-		NHeads:           lc.NumAttentionHeads,
-		NKVHeads:         lc.NumKeyValueHeads,
-		NLayer:           lc.NumHiddenLayers,
-		NVocab:           lc.VocabSize,
-		DHead:            lc.HeadDim,
-		NExperts:         lc.NumExperts,
-		NExpertsPerToken: lc.NumExpertsPerTok,
-		NMoeMlp:          intOr(lc.MoeIntermediateSize, 0),
-		NSharedExpertMlp: intOr(lc.SharedExpertIntermediateSize, 0),
-		LayerTypes:       lc.LayerTypes,
-		NLinearKHeads:    lc.LinearNumKeyHeads,
-		NLinearVHeads:    lc.LinearNumValueHeads,
-		DLinearK:         lc.LinearKeyHeadDim,
-		DLinearV:         lc.LinearValueHeadDim,
-		LinearConvKernel: intOr2(lc.LinearConvKernelDim, 4),
-		RmsNormEps:       lc.RmsNormEps,
-		RopeTheta:        lc.RopeTheta,
+		NEmbed:              lc.HiddenSize,
+		NHeads:              lc.NumAttentionHeads,
+		NKVHeads:            lc.NumKeyValueHeads,
+		NLayer:              lc.NumHiddenLayers,
+		NVocab:              lc.VocabSize,
+		DHead:               lc.HeadDim,
+		NExperts:            lc.NumExperts,
+		NExpertsPerToken:    lc.NumExpertsPerTok,
+		NMoeMlp:             intOr(lc.MoeIntermediateSize, 0),
+		NSharedExpertMlp:    intOr(lc.SharedExpertIntermediateSize, 0),
+		LayerTypes:          lc.LayerTypes,
+		NLinearKHeads:       lc.LinearNumKeyHeads,
+		NLinearVHeads:       lc.LinearNumValueHeads,
+		DLinearK:            lc.LinearKeyHeadDim,
+		DLinearV:            lc.LinearValueHeadDim,
+		LinearConvKernel:    intOr2(lc.LinearConvKernelDim, 4),
+		RmsNormEps:          lc.RmsNormEps,
+		RopeTheta:           lc.RopeTheta,
 		PartialRotaryFactor: lc.PartialRotaryFactor,
-		MropeSection:     lc.MropeSection,
+		MropeSection:        lc.MropeSection,
 	}
 	if top.TieWordEmbeddings != nil {
 		cfg.TieWordEmbeddings = *top.TieWordEmbeddings
