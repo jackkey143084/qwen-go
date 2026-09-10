@@ -126,136 +126,6 @@ func maxInt(a, b int) int {
 	return b
 }
 
-// resizeBicubicPIL matches PIL Image.resize(size, BICUBIC): separable filter, widened support when shrinking, uint8 result like an 8-bit source image.
-func resizeBicubicPIL(img image.Image, dw, dh int) *image.RGBA {
-	b := img.Bounds()
-	sw, sh := b.Dx(), b.Dy()
-	src := make([]float32, sw*sh*3)
-	for y := 0; y < sh; y++ {
-		for x := 0; x < sw; x++ {
-			r, g, bl, _ := img.At(b.Min.X+x, b.Min.Y+y).RGBA()
-			src[(y*sw+x)*3+0] = float32(r >> 8)
-			src[(y*sw+x)*3+1] = float32(g >> 8)
-			src[(y*sw+x)*3+2] = float32(bl >> 8)
-		}
-	}
-	horiz := resizeHorizontal(src, sh, sw, dw)
-	return toRGBA(resizeVertical(horiz, sh, dw, dh), dw, dh)
-}
-
-func cubicWeights(inLen, outLen int) (func(o int) []int, []func(o int) []float64) {
-	return nil, nil
-}
-
-// resizePass resizes along one axis of r rows: each row has inLen groups of
-// ch values; output rows have outLen groups.
-func resizePass(src []float32, inLen, outLen, rows, ch int) []float32 {
-	dst := make([]float32, rows*outLen*ch)
-	scale := float64(inLen) / float64(outLen)
-	filterscale := scale
-	if filterscale < 1 {
-		filterscale = 1
-	}
-	support := 2.0 * filterscale
-	for o := 0; o < outLen; o++ {
-		center := (float64(o) + 0.5) * scale
-		lo := floorInt(center - support)
-		hi := ceilInt(center + support)
-		ws := make([]float64, 0, hi-lo+1)
-		for j := lo; j <= hi; j++ {
-			ws = append(ws, cubicKernel((center-(float64(j)+0.5))/filterscale))
-		}
-		sum := 0.0
-		for _, w := range ws {
-			sum += w
-		}
-		for r := 0; r < rows; r++ {
-			for c := 0; c < ch; c++ {
-				var acc float64
-				for j, w := range ws {
-					sj := lo + j
-					if sj < 0 {
-						sj = 0
-					} else if sj >= inLen {
-						sj = inLen - 1
-					}
-					acc += float64(src[r*inLen*ch+sj*ch+c]) * w
-				}
-				acc /= sum
-				dst[r*outLen*ch+o*ch+c] = float32(acc)
-			}
-		}
-	}
-	return dst
-}
-
-func resizeHorizontal(src []float32, rows, inW, outW int) []float32 {
-	return resizePass(src, inW, outW, rows, 3)
-}
-
-// resizeVertical: src is inH rows × width×3; returns outH rows × width×3.
-func resizeVertical(src []float32, inH, width, outH int) []float32 {
-	dst := make([]float32, outH*width*3)
-	scale := float64(inH) / float64(outH)
-	filterscale := scale
-	if filterscale < 1 {
-		filterscale = 1
-	}
-	support := 2.0 * filterscale
-	for o := 0; o < outH; o++ {
-		center := (float64(o) + 0.5) * scale
-		lo := floorInt(center - support)
-		hi := ceilInt(center + support)
-		ws := make([]float64, 0, hi-lo+1)
-		for j := lo; j <= hi; j++ {
-			ws = append(ws, cubicKernel((center-(float64(j)+0.5))/filterscale))
-		}
-		sum := 0.0
-		for _, w := range ws {
-			sum += w
-		}
-		for r := 0; r < width; r++ {
-			for c := 0; c < 3; c++ {
-				var acc float64
-				for j, w := range ws {
-					sj := lo + j
-					if sj < 0 {
-						sj = 0
-					} else if sj >= inH {
-						sj = inH - 1
-					}
-					acc += float64(src[sj*width*3+r*3+c]) * w
-				}
-				acc /= sum
-				dst[o*width*3+r*3+c] = float32(acc)
-			}
-		}
-	}
-	return dst
-}
-
-func toRGBA(px []float32, w, h int) *image.RGBA {
-	out := image.NewRGBA(image.Rect(0, 0, w, h))
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			i := (y*w + x) * 3
-			p := out.Pix[(y*w+x)*4:]
-			for c := 0; c < 3; c++ {
-				v := int(px[i+c] + 0.5)
-				if v < 0 {
-					v = 0
-				} else if v > 255 {
-					v = 255
-				}
-				p[c] = uint8(v)
-			}
-			p[3] = 255
-		}
-	}
-	return out
-}
-
-// cubicKernel is the Mitchell-Netravali filter PIL uses for BICUBIC (a=-0.5).
 func cubicKernel(x float64) float64 {
 	x = math.Abs(x)
 	if x < 1 {
@@ -264,4 +134,169 @@ func cubicKernel(x float64) float64 {
 		return -0.5*x*x*x + 2.5*x*x - 4*x + 2
 	}
 	return 0
+}
+
+// Pillow's 8-bit resample path: 22-bit fixed-point coefficients, int32
+// accumulation with a rounding bias, clip to 0..255 after each pass.
+const precisionBits = 32 - 8 - 2
+
+// resizeBicubicPIL matches PIL Image.resize(size, BICUBIC) bit-for-bit:
+// verbatim Resample.c window bounds (C trunc with +-0.5), dropped-tap
+// renormalization at edges, uint8 intermediate between the two passes.
+func resizeBicubicPIL(img image.Image, dw, dh int) *image.RGBA {
+	b := img.Bounds()
+	sw, sh := b.Dx(), b.Dy()
+	src := make([]uint8, sw*sh*3)
+	for y := 0; y < sh; y++ {
+		for x := 0; x < sw; x++ {
+			r, g, bl, _ := img.At(b.Min.X+x, b.Min.Y+y).RGBA()
+			p := (y*sw + x) * 3
+			src[p+0] = uint8(r >> 8)
+			src[p+1] = uint8(g >> 8)
+			src[p+2] = uint8(bl >> 8)
+		}
+	}
+	horiz := resizeAxis8(src, sh, sw, dw, 3)
+	return toRGBA(resizeVertical8(horiz, sh, dw, dh), dw, dh)
+}
+
+// resizeVertical8: src has inH rows of width*3 samples; resize the row
+// count to outH (Pillow's second pass, uint8 intermediate).
+func resizeVertical8(src []uint8, inH, width, outH int) []uint8 {
+	scale := float64(inH) / float64(outH)
+	filterscale := scale
+	if filterscale < 1 {
+		filterscale = 1
+	}
+	support := 2.0 * filterscale
+	invFS := 1.0 / filterscale
+	dst := make([]uint8, outH*width*3)
+	for o := 0; o < outH; o++ {
+		center := (float64(o) + 0.5) * scale
+		xmin := int(center - support + 0.5)
+		if xmin < 0 {
+			xmin = 0
+		}
+		xmax := int(center + support + 0.5)
+		if xmax > inH {
+			xmax = inH
+		}
+		taps := xmax - xmin
+		ki := make([]int32, taps)
+		for x := 0; x < taps; x++ {
+			w := cubicKernel((float64(x+xmin)-center+0.5)*invFS) * (1 << precisionBits)
+			if w < 0 {
+				ki[x] = int32(w - 0.5)
+			} else {
+				ki[x] = int32(w + 0.5)
+			}
+		}
+		rnd := int32(1) << (precisionBits - 1)
+		for r := 0; r < width; r++ {
+			for c := 0; c < 3; c++ {
+				var acc int32
+				for x := 0; x < taps; x++ {
+					acc += int32(src[(xmin+x)*width*3+r*3+c]) * ki[x]
+				}
+				acc = (acc + rnd) >> precisionBits
+				if acc < 0 {
+					acc = 0
+				} else if acc > 255 {
+					acc = 255
+				}
+				dst[o*width*3+r*3+c] = uint8(acc)
+			}
+		}
+	}
+	return dst
+}
+
+// resizeAxis8 resizes along the axis of length inLen (rows entries of
+// inLen*ch samples); out has outLen*ch per row.
+func resizeAxis8(src []uint8, rows, inLen, outLen, ch int) []uint8 {
+	scale := float64(inLen) / float64(outLen)
+	filterscale := scale
+	if filterscale < 1 {
+		filterscale = 1
+	}
+	support := 2.0 * filterscale
+	invFS := 1.0 / filterscale
+	dst := make([]uint8, rows*outLen*ch)
+	for o := 0; o < outLen; o++ {
+		center := (float64(o) + 0.5) * scale
+		xmin := int(center - support + 0.5) // C trunc semantics
+		if xmin < 0 {
+			xmin = 0
+		}
+		xmax := int(center + support + 0.5)
+		if xmax > inLen {
+			xmax = inLen
+		}
+		taps := xmax - xmin
+		ki := make([]int32, taps)
+		sum := 0
+		for x := 0; x < taps; x++ {
+			w := cubicKernel((float64(x+xmin)-center+0.5)*invFS) * (1 << precisionBits)
+			if w < 0 {
+				ki[x] = int32(w - 0.5)
+			} else {
+				ki[x] = int32(w + 0.5)
+			}
+			sum += int(ki[x])
+		}
+		rnd := int32(1) << (precisionBits - 1)
+		for r := 0; r < rows; r++ {
+			for c := 0; c < ch; c++ {
+				var acc int32
+				for x := 0; x < taps; x++ {
+					acc += int32(src[r*inLen*ch+(xmin+x)*ch+c]) * ki[x]
+				}
+				acc = (acc + rnd) >> precisionBits
+				if acc < 0 {
+					acc = 0
+				} else if acc > 255 {
+					acc = 255
+				}
+				dst[r*outLen*ch+o*ch+c] = uint8(acc)
+			}
+		}
+	}
+	return dst
+}
+
+func toRGBA(px []uint8, w, h int) *image.RGBA {
+	out := image.NewRGBA(image.Rect(0, 0, w, h))
+	copy(out.Pix, pixToRGBA(px, w, h))
+	return out
+}
+
+func pixToRGBA(px []uint8, w, h int) []uint8 {
+	buf := make([]uint8, w*h*4)
+	for p := 0; p < w*h; p++ {
+		buf[p*4+0] = px[p*3+0]
+		buf[p*4+1] = px[p*3+1]
+		buf[p*4+2] = px[p*3+2]
+		buf[p*4+3] = 255
+	}
+	return buf
+}
+
+// DumpPixels writes the patch buffer as little-endian f32 (parity debugging).
+func DumpPixels(pixels []float32, path string) {
+	f, err := os.Create(path)
+	if err != nil {
+		panic(err)
+	}
+	defer f.Close()
+	buf := make([]byte, 4*len(pixels))
+	for i, v := range pixels {
+		bits := math.Float32bits(v)
+		buf[i*4] = byte(bits)
+		buf[i*4+1] = byte(bits >> 8)
+		buf[i*4+2] = byte(bits >> 16)
+		buf[i*4+3] = byte(bits >> 24)
+	}
+	if _, err := f.Write(buf); err != nil {
+		panic(err)
+	}
 }

@@ -8,6 +8,7 @@ package model
 import (
 	"fmt"
 	"math"
+	"os"
 
 	"tinyqwengo/safetensors"
 )
@@ -216,6 +217,10 @@ func (v *visionTower) encode(pixels []float32, g ImageGrid) ([]float32, error) {
 	// then reordered (hBlock, wBlock, mH, mW) like the patchify step.
 	pos := v.interpolatePosEmbed(g)
 	traceCK("vision.posonly", pos)
+	if debugToken0 {
+		dumpF32("/tmp/go_pos.f32", pos[:N*vc.NEmbed])
+		dumpF32("/tmp/go_hidden.f32", x[:N*vc.NEmbed])
+	}
 	for i := range x {
 		x[i] += pos[i]
 	}
@@ -224,8 +229,8 @@ func (v *visionTower) encode(pixels []float32, g ImageGrid) ([]float32, error) {
 	// rotary tables for this grid
 	cos, sin := v.rotTables(g)
 
-	for i, blk := range v.blocks {
-		x = v.blockForward(&blk, x, N, cos, sin)
+	for i := range v.blocks {
+		x = v.blockForward(&v.blocks[i], i, x, N, cos, sin)
 		traceCK(fmt.Sprintf("vision.block.%d", i), x)
 	}
 
@@ -373,7 +378,7 @@ func (v *visionTower) rotRow(cos, sin []float32, n, i, j, hd int) {
 	}
 }
 
-func (v *visionTower) blockForward(b *visionBlock, x []float32, N int, cos, sin []float32) []float32 {
+func (v *visionTower) blockForward(b *visionBlock, blockIdx int, x []float32, N int, cos, sin []float32) []float32 {
 	vc := v.cfg
 	hd := v.headDim
 
@@ -441,22 +446,46 @@ func (v *visionTower) blockForward(b *visionBlock, x []float32, N int, cos, sin 
 		x[i] += proj[i]
 	}
 	traceCK("vision.after_attn", x)
+	if debugToken0 {
+		fmt.Printf("GO a0[0:8]  %s\n", fmtSlice(x[0:8]))
+		fmt.Printf("GO a0 var %.8f mean %.8f\n", varianceOf(x[0:vc.NEmbed]), meanOf(x[0:vc.NEmbed]))
+
+	}
 
 	// x + mlp(norm2(x))  — gelu_pytorch_tanh
 	for n := 0; n < N; n++ {
 		copy(h[n*vc.NEmbed:(n+1)*vc.NEmbed], layerNorm(x[n*vc.NEmbed:(n+1)*vc.NEmbed], b.norm2W, b.norm2B, 1e-6))
 	}
 	traceCK("vision.norm2", h)
+	if debugToken0 {
+		fmt.Printf("GO n20[0:8] %s\n", fmtSlice(h[0:8]))
+		if blockIdx == 0 {
+			dumpF32("/tmp/go_norm2_b0.f32", h[:N*vc.NEmbed])
+			dumpF32("/tmp/go_after_attn_b0.f32", x[:N*vc.NEmbed])
+			dumpF32("/tmp/go_attn_preproj.f32", attn[:N*vc.NEmbed])
+			dumpF32("/tmp/go_proj_out.f32", proj[:N*vc.NEmbed])
+			dumpF32("/tmp/go_qkv.f32", qkv[:N*3*vc.NEmbed])
+		}
+	}
 	fc1 := make([]float32, N*vc.NMlp)
 	mat2DRaw(b.fc1W, b.fc1B, h, fc1, N, vc.NEmbed, vc.NMlp)
+	if debugToken0 && blockIdx == 0 {
+		dumpF32("/tmp/go_fc1_pre.f32", fc1[:N*vc.NMlp])
+	}
 	traceCK("vision.fc1_pre", fc1)
 	for i := range fc1 {
 		fc1[i] = geluTanh(fc1[i])
 	}
 	traceCK("vision.fc1_gelu", fc1)
+	if debugToken0 && blockIdx == 0 {
+		dumpF32("/tmp/go_fc1_gelu.f32", fc1[:N*vc.NMlp])
+	}
 	fc2 := make([]float32, N*vc.NEmbed)
 	mat2DRaw(b.fc2W, b.fc2B, fc1, fc2, N, vc.NMlp, vc.NEmbed)
 	traceCK("vision.fc2", fc2)
+	if debugToken0 && blockIdx == 0 {
+		dumpF32("/tmp/go_mlp_out.f32", fc2[:N*vc.NEmbed])
+	}
 	for i := range x {
 		x[i] += fc2[i]
 	}
@@ -557,3 +586,59 @@ func mropePositions(inputIDs []int, grids []ImageGrid, imageTokenID int) ([3][]i
 }
 
 func (g ImageGrid) cfg() int { return spatialMergeSize }
+
+var debugToken0 = os.Getenv("QWENGO_DEBUG0") == "1"
+
+func fmtSlice(v []float32) string {
+	s := ""
+	for _, x := range v {
+		s += fmt.Sprintf("%.4f ", x)
+	}
+	return s
+}
+
+func varianceOf(v []float32) float64 {
+	var m, q float64
+	for _, x := range v {
+		m += float64(x)
+	}
+	m /= float64(len(v))
+	for _, x := range v {
+		d := float64(x) - m
+		q += d * d
+	}
+	return q / float64(len(v))
+}
+
+func meanOf(v []float32) float64 {
+	var m float64
+	for _, x := range v {
+		m += float64(x)
+	}
+	return m / float64(len(v))
+}
+
+// LayerNormExport exposes layerNorm for parity tests.
+func LayerNormExport(x, w, b []float32, eps float64) []float32 { return layerNorm(x, w, b, eps) }
+
+// F32FromBits rebuilds a float32 from IEEE bits (test helper).
+func F32FromBits(bits uint32) float32 { return math.Float32frombits(bits) }
+
+func dumpF32(path string, v []float32) {
+	f, err := os.Create(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	buf := make([]byte, 4*len(v))
+	for i, x := range v {
+		b := math.Float32bits(x)
+		buf[i*4] = byte(b)
+		buf[i*4+1] = byte(b >> 8)
+		buf[i*4+2] = byte(b >> 16)
+		buf[i*4+3] = byte(b >> 24)
+	}
+	if _, err := f.Write(buf); err != nil {
+		panic(err)
+	}
+}

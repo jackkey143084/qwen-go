@@ -30,6 +30,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "image:", err)
 		os.Exit(1)
 	}
+	model.DumpPixels(pixels, "/tmp/go_pixels.f32")
 
 	// replicate Processor.__call__ for a single user message with one image
 	padCount := (grid.T * grid.H * grid.W) / 4
